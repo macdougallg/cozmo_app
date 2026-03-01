@@ -38,7 +38,7 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
         private const val COZMO_SSID_PREFIX = "Cozmo_"
         private const val CONNECTION_TIMEOUT_MS = 20_000L
         private const val POLL_INTERVAL_MS = 2_000L
-        private const val POLL_MAX_ATTEMPTS = 30 // 60 seconds
+        private const val POLL_MAX_ATTEMPTS = 90 // 180 seconds
         private const val RECONNECT_ATTEMPTS = 3
         private const val RECONNECT_DELAY_MS = 5_000L
     }
@@ -188,7 +188,8 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
             Log.i(TAG, "Connected to Cozmo network")
             emit(ConnectionState.Connected)
         } else {
-            Log.w(TAG, "Connection timed out — triggering fallback")
+            Log.w(TAG, "Connection timed out — unregistering specifier and triggering fallback")
+            unregisterCallback()
             triggerFallback()
         }
     }
@@ -301,19 +302,22 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
 
     /**
      * Extracts the connected WiFi SSID from NetworkCapabilities.
-     * Works on API 29+ by reading WifiInfo via transportInfo.
-     * Falls back to null if SSID is unavailable or unknown.
+     *
+     * On API 29+, tries transportInfo (WifiInfo) first. Fire OS 8 may redact
+     * the SSID as "<unknown ssid>" even with ACCESS_FINE_LOCATION granted, so
+     * we fall back to WifiManager.connectionInfo which reads the real SSID.
      */
+    @Suppress("DEPRECATION")
     private fun getCozmoSsidFromCaps(caps: NetworkCapabilities): String? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val wifiInfo = caps.transportInfo as? android.net.wifi.WifiInfo ?: return null
-            val ssid = wifiInfo.ssid ?: return null
-            // WifiInfo.ssid is wrapped in quotes: "Cozmo_ABC123" — strip them
-            ssid.removeSurrounding("\"").takeIf { it != "<unknown ssid>" }
-        } else {
-            @Suppress("DEPRECATION")
-            wifiManager.connectionInfo?.ssid?.removeSurrounding("\"")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val wifiInfo = caps.transportInfo as? android.net.wifi.WifiInfo
+            val ssid = wifiInfo?.ssid?.removeSurrounding("\"")
+                ?.takeIf { it != "<unknown ssid>" }
+            if (ssid != null) return ssid
+            // Fire OS redacts transportInfo SSID — fall back to WifiManager
         }
+        return wifiManager.connectionInfo?.ssid?.removeSurrounding("\"")
+            ?.takeIf { it.isNotEmpty() && it != "<unknown ssid>" }
     }
 
     // ── Reconnection ──────────────────────────────────────────────────────────

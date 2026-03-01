@@ -1,5 +1,9 @@
 package com.macdougallg.cozmoplay.ui.screens.connect
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -14,11 +18,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.macdougallg.cozmoplay.types.ConnectionState
 import com.macdougallg.cozmoplay.ui.theme.*
 import kotlinx.coroutines.delay
@@ -32,6 +38,22 @@ fun ConnectScreen(
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
     val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) viewModel.connect()
+    }
+
+    fun connectWithPermission() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED) {
+            viewModel.connect()
+        } else {
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
 
     LaunchedEffect(connectionState) {
         if (connectionState is ConnectionState.Connected) {
@@ -86,7 +108,7 @@ fun ConnectScreen(
                     Button(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.connect()
+                            connectWithPermission()
                         },
                         enabled = connectionState is ConnectionState.Idle,
                         modifier = Modifier.fillMaxWidth().height(80.dp),
@@ -103,7 +125,7 @@ fun ConnectScreen(
                     Button(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.connect()
+                            connectWithPermission()
                         },
                         modifier = Modifier.fillMaxWidth().height(80.dp),
                         shape = RoundedCornerShape(16.dp),
