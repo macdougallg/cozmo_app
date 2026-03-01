@@ -19,310 +19,339 @@ import java.net.DatagramSocket
 import java.net.Socket
 
 /**
- * Concrete implementation of [ICozmoWifi].
+ * Production implementation of [ICozmoWifi].
  *
- * Handles both API 28 (Fire OS 7) and API 30+ (Fire OS 8) connection paths,
- * chosen at runtime via [Build.VERSION.SDK_INT].
+ * Connection strategy:
+ * - API 30+: WifiNetworkSpecifier peer-to-peer request. The key insight is that
+ *   we must NOT call bindProcessToNetwork() — instead we bind individual sockets
+ *   to the returned Network object so the rest of the app keeps internet.
+ * - API 28: Legacy WifiManager path with manual SSID scan and network selection.
  *
- * Instantiate once per Application lifecycle via Koin or manual DI.
- * Never instantiate per-ViewModel — the network binding is a singleton resource.
+ * Manual fallback polling (API 29+ compatible):
+ * - Uses NetworkCapabilities + SSID transport info instead of deprecated extraInfo.
+ * - On API 29+, WifiInfo is only accessible via NetworkCapabilities.transportInfo.
  */
 class CozmoWifiManager(private val context: Context) : ICozmoWifi {
 
     companion object {
         private const val TAG = "CozmoWifi"
-        const val COZMO_IP = "192.168.1.1"
-        const val COZMO_PORT = 5551
         private const val COZMO_SSID_PREFIX = "Cozmo_"
         private const val CONNECTION_TIMEOUT_MS = 20_000L
         private const val POLL_INTERVAL_MS = 2_000L
-        private const val POLL_MAX_DURATION_MS = 60_000L
-        private const val RECONNECT_MAX_ATTEMPTS = 3
-        private const val RECONNECT_INTERVAL_MS = 5_000L
+        private const val POLL_MAX_ATTEMPTS = 30 // 60 seconds
+        private const val RECONNECT_ATTEMPTS = 3
+        private const val RECONNECT_DELAY_MS = 5_000L
     }
-
-    // ── State ──────────────────────────────────────────────────────────────────
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+    override val isConnected: Boolean get() = _connectionState.value is ConnectionState.Connected
+    override val cozmoIpAddress: String = "192.168.1.1"
+    override val cozmoPort: Int = 5551
 
-    override val isConnected: Boolean
-        get() = _connectionState.value is ConnectionState.Connected
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
-    override val cozmoIpAddress: String = COZMO_IP
-    override val cozmoPort: Int = COZMO_PORT
-
-    // ── Internal ───────────────────────────────────────────────────────────────
-
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val connectivityManager =
-        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    private val wifiManager =
-        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-
-    /** The bound Cozmo Network object — null until Connected. */
     @Volatile private var cozmoNetwork: Network? = null
-
-    /** Active network callback for API 30+ path — must be unregistered on cleanup. */
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-
-    private var connectJob: Job? = null
-    private var pollJob: Job? = null
+    @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var reconnectAttempts = 0
+    private var pollJob: Job? = null
+    private var connectJob: Job? = null
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────────
 
     override fun connect() {
         if (_connectionState.value is ConnectionState.Connected ||
             _connectionState.value is ConnectionState.Connecting) {
-            Log.d(TAG, "connect() called but already connected/connecting — ignoring")
+            Log.d(TAG, "connect() called while already connecting/connected — ignoring")
             return
         }
+        reconnectAttempts = 0
         connectJob?.cancel()
-        connectJob = scope.launch {
-            emit(ConnectionState.Scanning)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                connectApi30()
-            } else {
-                connectApi28()
-            }
-        }
+        connectJob = scope.launch { doConnect() }
     }
 
     override fun disconnect() {
         connectJob?.cancel()
         pollJob?.cancel()
-        unregisterNetworkCallback()
+        unregisterCallback()
         cozmoNetwork = null
         emit(ConnectionState.Disconnected)
-        Log.i(TAG, "Disconnected from Cozmo network")
     }
 
     override fun shutdown() {
-        disconnect()
+        connectJob?.cancel()
+        pollJob?.cancel()
+        unregisterCallback()
+        cozmoNetwork = null
         scope.cancel()
-        Log.i(TAG, "CozmoWifiManager shutdown complete")
+        emit(ConnectionState.Idle)
     }
 
     override fun createBoundSocket(): DatagramSocket {
-        val network = cozmoNetwork
-            ?: throw CozmoNotConnectedException("Cannot create socket — not connected to Cozmo network")
+        val net = cozmoNetwork ?: throw CozmoNotConnectedException(
+            "createBoundSocket() called but cozmoNetwork is null — not connected")
         return DatagramSocket().also { socket ->
-            network.bindSocket(socket)
-            Log.d(TAG, "Created UDP socket bound to Cozmo network")
+            net.bindSocket(socket)
+            Log.d(TAG, "UDP socket bound to Cozmo network")
         }
     }
 
     override fun createBoundTcpSocket(): Socket {
-        val network = cozmoNetwork
-            ?: throw CozmoNotConnectedException("Cannot create TCP socket — not connected to Cozmo network")
-        return network.socketFactory.createSocket().also {
-            Log.d(TAG, "Created TCP socket bound to Cozmo network")
+        val net = cozmoNetwork ?: throw CozmoNotConnectedException(
+            "createBoundTcpSocket() called but cozmoNetwork is null — not connected")
+        return net.socketFactory.createSocket().also {
+            Log.d(TAG, "TCP socket created via Cozmo network socket factory")
         }
     }
 
-    // ── API 30+ Connection Path ────────────────────────────────────────────────
+    // ── Connection Logic ──────────────────────────────────────────────────────
 
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun doConnect() {
+        emit(ConnectionState.Scanning)
+        Log.i(TAG, "Starting connection — SDK ${Build.VERSION.SDK_INT}")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            connectApi30()
+        } else {
+            connectApi28()
+        }
+    }
+
+    // ── API 30+ Path ──────────────────────────────────────────────────────────
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
     private suspend fun connectApi30() {
-        Log.i(TAG, "Using API 30+ WifiNetworkSpecifier path")
-        emit(ConnectionState.Connecting)
+        Log.d(TAG, "Using API 30+ WifiNetworkSpecifier path")
+
+        // Unregister any previous callback first
+        unregisterCallback()
 
         val specifier = WifiNetworkSpecifier.Builder()
-            .setSsidPattern(android.os.PatternMatcher(COZMO_SSID_PREFIX, android.os.PatternMatcher.PATTERN_PREFIX))
+            .setSsidPattern(android.os.PatternMatcher(
+                COZMO_SSID_PREFIX, android.os.PatternMatcher.PATTERN_PREFIX))
             .build()
 
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .setNetworkSpecifier(specifier)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) // Cozmo has no internet
             .build()
 
-        val connectionResult = CompletableDeferred<Network?>()
+        val deferred = CompletableDeferred<Network?>()
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                Log.i(TAG, "Cozmo network available (API 30+)")
-                connectionResult.complete(network)
+                Log.i(TAG, "onAvailable: Cozmo network found — $network")
+                cozmoNetwork = network
+                if (!deferred.isCompleted) deferred.complete(network)
+            }
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                caps: NetworkCapabilities,
+            ) {
+                // Network is ready once we receive capabilities — update reference
+                cozmoNetwork = network
+                Log.d(TAG, "onCapabilitiesChanged: network ready")
             }
 
             override fun onUnavailable() {
-                Log.w(TAG, "Cozmo network unavailable (API 30+)")
-                connectionResult.complete(null)
+                Log.w(TAG, "onUnavailable: no matching Cozmo network found")
+                if (!deferred.isCompleted) deferred.complete(null)
             }
 
             override fun onLost(network: Network) {
-                Log.w(TAG, "Cozmo network lost")
+                Log.w(TAG, "onLost: Cozmo network dropped")
+                cozmoNetwork = null
                 handleConnectionLost()
             }
         }
 
         networkCallback = callback
-        connectivityManager.requestNetwork(request, callback)
+        emit(ConnectionState.Connecting)
 
-        val network = withTimeoutOrNull(CONNECTION_TIMEOUT_MS) { connectionResult.await() }
+        try {
+            // IMPORTANT: requestNetwork with NetworkCallback — not requestNetwork with Handler.
+            // This is the peer-to-peer local network request pattern for hotspot devices.
+            connectivityManager.requestNetwork(request, callback)
+        } catch (e: Exception) {
+            Log.e(TAG, "requestNetwork failed: ${e.message}")
+            triggerFallback()
+            return
+        }
+
+        val network = withTimeoutOrNull(CONNECTION_TIMEOUT_MS) { deferred.await() }
 
         if (network != null) {
-            cozmoNetwork = network
-            reconnectAttempts = 0
+            Log.i(TAG, "Connected to Cozmo network")
             emit(ConnectionState.Connected)
-            Log.i(TAG, "Connected to Cozmo (API 30+)")
         } else {
-            unregisterNetworkCallback()
             Log.w(TAG, "Connection timed out — triggering fallback")
             triggerFallback()
         }
     }
 
-    // ── API 28 Connection Path ─────────────────────────────────────────────────
+    // ── API 28 Path ───────────────────────────────────────────────────────────
 
     @Suppress("DEPRECATION")
     private suspend fun connectApi28() {
-        Log.i(TAG, "Using API 28 WifiManager legacy path")
+        Log.d(TAG, "Using API 28 legacy WifiManager path")
         emit(ConnectionState.Connecting)
 
-        // Scan for Cozmo SSIDs using the scan results
-        val scanResults = withContext(Dispatchers.IO) {
+        withContext(Dispatchers.IO) {
+            // Scan for Cozmo networks
             wifiManager.startScan()
-            delay(3000) // Allow scan to complete
-            wifiManager.scanResults
-        }
+            delay(3000) // give scan time to complete
 
-        val cozmoSsids = scanResults
-            .filter { it.SSID.startsWith(COZMO_SSID_PREFIX, ignoreCase = true) }
-            .map { it.SSID }
+            val cozmoResult = wifiManager.scanResults
+                .firstOrNull { it.SSID.startsWith(COZMO_SSID_PREFIX) }
 
-        if (cozmoSsids.isEmpty()) {
-            Log.w(TAG, "No Cozmo SSIDs found in scan")
-            emit(ConnectionState.NotFound)
-            triggerFallback()
-            return
-        }
-
-        emit(ConnectionState.Found(cozmoSsids))
-        val targetSsid = cozmoSsids.first()
-        Log.i(TAG, "Found Cozmo SSID: $targetSsid — attempting connection")
-
-        val config = android.net.wifi.WifiConfiguration().apply {
-            SSID = "\"$targetSsid\""
-            allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
-        }
-
-        val networkId = wifiManager.addNetwork(config).also {
-            if (it == -1) {
-                Log.e(TAG, "Failed to add Cozmo network config")
-                emit(ConnectionState.Error(ConnectionError.NETWORK_REJECTED))
-                return
+            if (cozmoResult == null) {
+                Log.w(TAG, "No Cozmo SSID found in scan results")
+                triggerFallback()
+                return@withContext
             }
-        }
 
-        wifiManager.enableNetwork(networkId, true)
-        wifiManager.reconnect()
+            Log.i(TAG, "Found Cozmo SSID: ${cozmoResult.SSID}")
+            emit(ConnectionState.Found(listOf(cozmoResult.SSID)))
 
-        // Poll ConnectivityManager for the bound Cozmo network
-        val network = withTimeoutOrNull(CONNECTION_TIMEOUT_MS) {
+            val config = android.net.wifi.WifiConfiguration().apply {
+                SSID = "\"${cozmoResult.SSID}\""
+                allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
+            }
+
+            val netId = wifiManager.addNetwork(config).takeIf { it != -1 }
+                ?: run { triggerFallback(); return@withContext }
+
+            wifiManager.disconnect()
+            wifiManager.enableNetwork(netId, true)
+            wifiManager.reconnect()
+
+            // Wait for the network to appear in ConnectivityManager
             var found: Network? = null
-            while (found == null) {
-                delay(500)
+            repeat(10) {
+                delay(1500)
                 found = connectivityManager.allNetworks.firstOrNull { net ->
-                    val info = connectivityManager.getNetworkInfo(net)
-                    info?.isConnected == true &&
-                        connectivityManager.getNetworkCapabilities(net)
-                            ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                    val caps = connectivityManager.getNetworkCapabilities(net) ?: return@firstOrNull false
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                        getCozmoSsidFromCaps(caps) != null
                 }
+                if (found != null) return@repeat
             }
-            found
-        }
 
-        if (network != null) {
-            // Restore default network to preserve internet access on home WiFi
-            connectivityManager.bindProcessToNetwork(null)
-            cozmoNetwork = network
-            reconnectAttempts = 0
-            emit(ConnectionState.Connected)
-            Log.i(TAG, "Connected to Cozmo (API 28)")
-        } else {
-            Log.w(TAG, "API 28 connection timed out — triggering fallback")
-            triggerFallback()
+            if (found != null) {
+                // Restore default network to null so internet still works
+                connectivityManager.bindProcessToNetwork(null)
+                cozmoNetwork = found
+                emit(ConnectionState.Connected)
+            } else {
+                triggerFallback()
+            }
         }
     }
 
-    // ── Fallback & Polling ─────────────────────────────────────────────────────
+    // ── Fallback / Manual Polling ─────────────────────────────────────────────
 
     private fun triggerFallback() {
+        Log.i(TAG, "Entering fallback — awaiting manual WiFi switch")
         emit(ConnectionState.FallbackRequired)
         startPolling()
     }
 
     private fun startPolling() {
         pollJob?.cancel()
+        emit(ConnectionState.Polling)
         pollJob = scope.launch {
-            emit(ConnectionState.Polling)
-            val startTime = System.currentTimeMillis()
-            while (System.currentTimeMillis() - startTime < POLL_MAX_DURATION_MS) {
+            repeat(POLL_MAX_ATTEMPTS) { attempt ->
                 delay(POLL_INTERVAL_MS)
-                if (isCozmoNetworkActive()) {
-                    Log.i(TAG, "Polling detected manual Cozmo connection")
-                    // Bind socket to detected network then signal connected
-                    val network = connectivityManager.allNetworks.firstOrNull { net ->
-                        val caps = connectivityManager.getNetworkCapabilities(net)
-                        caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-                    }
-                    if (network != null) {
-                        cozmoNetwork = network
-                        reconnectAttempts = 0
-                        emit(ConnectionState.Connected)
-                        return@launch
-                    }
+                Log.d(TAG, "Polling attempt ${attempt + 1}/$POLL_MAX_ATTEMPTS")
+
+                val cozmoNet = findCozmoNetworkInConnectedNetworks()
+                if (cozmoNet != null) {
+                    Log.i(TAG, "Manual connection detected via poll")
+                    cozmoNetwork = cozmoNet
+                    emit(ConnectionState.Connected)
+                    return@launch
                 }
             }
-            Log.w(TAG, "Polling timed out after ${POLL_MAX_DURATION_MS}ms")
+            Log.w(TAG, "Polling timed out")
             emit(ConnectionState.TimedOut)
         }
     }
 
-    private fun isCozmoNetworkActive(): Boolean {
-        return connectivityManager.allNetworks.any { net ->
-            val info = connectivityManager.getNetworkInfo(net)
-            info?.isConnected == true && info.extraInfo?.contains(COZMO_SSID_PREFIX, ignoreCase = true) == true
+    /**
+     * Finds a connected WiFi network whose SSID matches Cozmo_*.
+     *
+     * API 29+ compatible: reads SSID from NetworkCapabilities.transportInfo
+     * (WifiInfo) rather than the deprecated ConnectivityManager.getNetworkInfo()
+     * or NetworkInfo.extraInfo which are always blank on API 29+.
+     */
+    @Suppress("DEPRECATION")
+    private fun findCozmoNetworkInConnectedNetworks(): Network? {
+        return connectivityManager.allNetworks.firstOrNull { network ->
+            val caps = connectivityManager.getNetworkCapabilities(network) ?: return@firstOrNull false
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@firstOrNull false
+            val ssid = getCozmoSsidFromCaps(caps) ?: return@firstOrNull false
+            Log.d(TAG, "Poll found WiFi network with SSID: $ssid")
+            ssid.startsWith(COZMO_SSID_PREFIX, ignoreCase = true)
         }
     }
 
-    // ── Reconnection ───────────────────────────────────────────────────────────
+    /**
+     * Extracts the connected WiFi SSID from NetworkCapabilities.
+     * Works on API 29+ by reading WifiInfo via transportInfo.
+     * Falls back to null if SSID is unavailable or unknown.
+     */
+    private fun getCozmoSsidFromCaps(caps: NetworkCapabilities): String? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val wifiInfo = caps.transportInfo as? android.net.wifi.WifiInfo ?: return null
+            val ssid = wifiInfo.ssid ?: return null
+            // WifiInfo.ssid is wrapped in quotes: "Cozmo_ABC123" — strip them
+            ssid.removeSurrounding("\"").takeIf { it != "<unknown ssid>" }
+        } else {
+            @Suppress("DEPRECATION")
+            wifiManager.connectionInfo?.ssid?.removeSurrounding("\"")
+        }
+    }
+
+    // ── Reconnection ──────────────────────────────────────────────────────────
 
     private fun handleConnectionLost() {
-        if (_connectionState.value !is ConnectionState.Connected) return
-        scope.launch {
-            emit(ConnectionState.Disconnected)
-            if (reconnectAttempts < RECONNECT_MAX_ATTEMPTS) {
-                reconnectAttempts++
-                Log.i(TAG, "Attempting reconnection $reconnectAttempts/$RECONNECT_MAX_ATTEMPTS")
-                delay(RECONNECT_INTERVAL_MS)
-                connect()
-            } else {
-                Log.w(TAG, "Max reconnection attempts reached — triggering fallback")
-                reconnectAttempts = 0
-                triggerFallback()
-            }
+        if (reconnectAttempts >= RECONNECT_ATTEMPTS) {
+            Log.w(TAG, "Max reconnect attempts reached — falling back")
+            triggerFallback()
+            return
+        }
+        reconnectAttempts++
+        Log.i(TAG, "Reconnecting (attempt $reconnectAttempts/$RECONNECT_ATTEMPTS)")
+        emit(ConnectionState.Scanning)
+        connectJob?.cancel()
+        connectJob = scope.launch {
+            delay(RECONNECT_DELAY_MS)
+            doConnect()
         }
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun unregisterCallback() {
+        networkCallback?.let {
+            try {
+                connectivityManager.unregisterNetworkCallback(it)
+                Log.d(TAG, "NetworkCallback unregistered")
+            } catch (e: Exception) {
+                Log.w(TAG, "unregisterNetworkCallback failed (already unregistered?): ${e.message}")
+            }
+        }
+        networkCallback = null
+    }
 
     private fun emit(state: ConnectionState) {
         scope.launch(Dispatchers.Main) {
             _connectionState.value = state
-        }
-    }
-
-    private fun unregisterNetworkCallback() {
-        networkCallback?.let {
-            try {
-                connectivityManager.unregisterNetworkCallback(it)
-                Log.d(TAG, "Network callback unregistered")
-            } catch (e: IllegalArgumentException) {
-                Log.w(TAG, "Network callback was already unregistered: ${e.message}")
-            }
-            networkCallback = null
+            Log.d(TAG, "ConnectionState → $state")
         }
     }
 }

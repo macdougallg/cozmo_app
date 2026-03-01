@@ -32,8 +32,8 @@ class MockCozmoWifi : ICozmoWifi {
     override val isConnected: Boolean
         get() = _connectionState.value is ConnectionState.Connected
 
-    override val cozmoIpAddress: String = CozmoWifiManager.COZMO_IP
-    override val cozmoPort: Int = CozmoWifiManager.COZMO_PORT
+    override val cozmoIpAddress: String = "192.168.1.1"
+    override val cozmoPort: Int = 5551
 
     // Recorded calls for assertion in tests
     var connectCallCount = 0
