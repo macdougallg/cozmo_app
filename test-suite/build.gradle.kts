@@ -20,21 +20,31 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
-    // All modules — test-suite depends on everything (API Contract section 1)
+    // All modules under test
     implementation(project(":cozmo-types"))
     implementation(project(":cozmo-wifi"))
     implementation(project(":cozmo-protocol"))
     implementation(project(":cozmo-camera"))
 
+    // App ViewModels — accessed directly for ViewModel integration tests
+    implementation(project(":app"))
+
+    // Lifecycle — needed to access ViewModel supertypes from :app (app impl deps don't leak)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+
+    // Coroutines
     implementation(libs.kotlinx.coroutines.android)
 
+    // Test dependencies
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
-    androidTestImplementation(libs.androidx.junit.ext)
-    androidTestImplementation(libs.mockk.android)
 }
