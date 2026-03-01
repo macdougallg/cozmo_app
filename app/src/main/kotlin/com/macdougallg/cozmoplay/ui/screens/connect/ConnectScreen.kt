@@ -13,24 +13,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.macdougallg.cozmoplay.types.ConnectionState
 import com.macdougallg.cozmoplay.ui.theme.*
+import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
 
-/**
- * ConnectScreen — the gating screen shown on every app launch.
- * (UI PRD section 3.1)
- *
- * Landscape split layout:
- * - Left 50%: Cozmo illustration + status ring animation
- * - Right 50%: status label + connect/retry buttons + manual help link
- */
 @Composable
 fun ConnectScreen(
     onConnected: () -> Unit,
@@ -40,17 +33,16 @@ fun ConnectScreen(
     val connectionState by viewModel.connectionState.collectAsState()
     val haptic = LocalHapticFeedback.current
 
-    // Auto-navigate to Home when connected
     LaunchedEffect(connectionState) {
         if (connectionState is ConnectionState.Connected) {
-            kotlinx.coroutines.delay(1500)
+            delay(1500)
             onConnected()
         }
     }
 
     Row(modifier = Modifier.fillMaxSize().background(AppBackground)) {
 
-        // ── Left Panel: Illustration + Status Ring ─────────────────────────
+        // Left panel — illustration + status ring
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -60,178 +52,130 @@ fun ConnectScreen(
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 StatusRing(connectionState = connectionState)
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "🤖", // TODO Agent 3: Replace with Lottie Cozmo animation
-                    fontSize = 80.sp,
-                )
+                Spacer(Modifier.height(16.dp))
+                Text(text = "🤖", fontSize = 80.sp)
             }
         }
 
-        // ── Right Panel: Status + Controls ────────────────────────────────
+        // Right panel — status + controls
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
                 .padding(32.dp),
         ) {
-            // Settings icon (top-right)
             IconButton(
                 onClick = onNavigateToSettings,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(48.dp),
-            ) {
-                Text("⚙️", fontSize = 24.sp)
-            }
+                modifier = Modifier.align(Alignment.TopEnd).size(48.dp),
+            ) { Text("⚙️", fontSize = 24.sp) }
 
             Column(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
-                // Status label
                 Text(
-                    text = connectionState.toChildFacingString(),
+                    text = connectionState.toChildString(),
                     style = MaterialTheme.typography.displayMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 24.sp,
-                        textAlign = TextAlign.Center,
+                        fontSize = 22.sp, textAlign = TextAlign.Center,
                     ),
                     color = TextPrimary,
                 )
 
-                // Connect button — hidden in error/retry states
-                if (connectionState.showConnectButton) {
+                if (connectionState.showConnect) {
                     Button(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.connect()
                         },
-                        enabled = connectionState.connectButtonEnabled,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(80.dp),
+                        enabled = connectionState is ConnectionState.Idle,
+                        modifier = Modifier.fillMaxWidth().height(80.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
                     ) {
-                        Text(
-                            "🔍  Find Cozmo",
+                        Text("🔍  Find Cozmo",
                             style = MaterialTheme.typography.labelLarge.copy(fontSize = 18.sp),
-                            color = Color.White,
-                        )
+                            color = Color.White)
                     }
                 }
 
-                // Retry button — shown in error/fallback states
-                if (connectionState.showRetryButton) {
+                if (connectionState.showRetry) {
                     Button(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.connect()
                         },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(80.dp),
+                        modifier = Modifier.fillMaxWidth().height(80.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = CozmoOrange),
                     ) {
-                        Text(
-                            "🔄  Try Again",
+                        Text("🔄  Try Again",
                             style = MaterialTheme.typography.labelLarge.copy(fontSize = 18.sp),
-                            color = Color.White,
-                        )
+                            color = Color.White)
                     }
                 }
             }
 
-            // Manual help link (bottom-right)
             TextButton(
                 onClick = { viewModel.triggerManualFallback() },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
+                modifier = Modifier.align(Alignment.BottomEnd)
                     .sizeIn(minWidth = 48.dp, minHeight = 48.dp),
             ) {
-                Text(
-                    "❓  Set up WiFi manually",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
-                )
+                Text("❓  Set up WiFi manually",
+                    style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             }
         }
     }
 }
 
-// ── Status Ring Composable ─────────────────────────────────────────────────────
-
 @Composable
 private fun StatusRing(connectionState: ConnectionState) {
-    val isSpinning = connectionState is ConnectionState.Scanning ||
-        connectionState is ConnectionState.Connecting ||
-        connectionState is ConnectionState.Polling
+    val spinning = connectionState is ConnectionState.Scanning
+        || connectionState is ConnectionState.Connecting
+        || connectionState is ConnectionState.Polling
 
-    val infiniteTransition = rememberInfiniteTransition(label = "ring_spin")
-    val rotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = if (isSpinning) 360f else 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
+    val infinite = rememberInfiniteTransition(label = "ring")
+    val rotation by infinite.animateFloat(
+        initialValue = 0f, targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing)),
         label = "rotation",
     )
-
-    val ringColor by animateColorAsState(
+    val color by animateColorAsState(
         targetValue = when (connectionState) {
             is ConnectionState.Connected -> SuccessGreen
-            is ConnectionState.Error -> ErrorRed
-            else -> PrimaryBlue
-        },
-        label = "ring_color",
+            is ConnectionState.Error    -> ErrorRed
+            else                        -> PrimaryBlue
+        }, label = "ring_color",
     )
-
     Box(
-        modifier = Modifier
-            .size(140.dp)
-            .rotate(if (isSpinning) rotation else 0f)
+        modifier = Modifier.size(140.dp)
+            .rotate(if (spinning) rotation else 0f)
             .clip(CircleShape)
-            .background(ringColor.copy(alpha = 0.2f)),
+            .background(color.copy(alpha = 0.2f)),
         contentAlignment = Alignment.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(120.dp)
-                .clip(CircleShape)
-                .background(AppBackground),
-        )
+        Box(Modifier.size(120.dp).clip(CircleShape).background(AppBackground))
     }
 }
 
-// ── Extension helpers ──────────────────────────────────────────────────────────
-
-private fun ConnectionState.toChildFacingString(): String = when (this) {
-    is ConnectionState.Idle -> "Ready to connect!"
-    is ConnectionState.Scanning -> "Looking for Cozmo..."
-    is ConnectionState.Found -> "Found Cozmo! Connecting..."
-    is ConnectionState.Connecting -> "Found Cozmo! Connecting..."
-    is ConnectionState.Connected -> "Cozmo is ready! 🎉"
+private fun ConnectionState.toChildString() = when (this) {
+    is ConnectionState.Idle             -> "Ready to connect!"
+    is ConnectionState.Scanning         -> "Looking for Cozmo..."
+    is ConnectionState.Found            -> "Found Cozmo! Connecting..."
+    is ConnectionState.Connecting       -> "Found Cozmo! Connecting..."
+    is ConnectionState.Connected        -> "Cozmo is ready! 🎉"
     is ConnectionState.FallbackRequired -> "Let's try another way"
-    is ConnectionState.Polling -> "Waiting for WiFi switch..."
-    is ConnectionState.Disconnected -> "Cozmo wandered off... finding them again"
-    is ConnectionState.TimedOut -> "Hmm, can't find Cozmo"
-    is ConnectionState.NotFound -> "Hmm, can't find Cozmo"
-    is ConnectionState.Error -> "Hmm, can't find Cozmo"
+    is ConnectionState.Polling          -> "Waiting for WiFi switch..."
+    is ConnectionState.Disconnected     -> "Cozmo wandered off..."
+    is ConnectionState.TimedOut         -> "Hmm, can't find Cozmo"
+    is ConnectionState.NotFound         -> "Hmm, can't find Cozmo"
+    is ConnectionState.Error            -> "Hmm, can't find Cozmo"
 }
 
-private val ConnectionState.showConnectButton: Boolean
-    get() = this is ConnectionState.Idle
+private val ConnectionState.showConnect get() =
+    this is ConnectionState.Idle
 
-private val ConnectionState.showRetryButton: Boolean
-    get() = this is ConnectionState.Error ||
-        this is ConnectionState.FallbackRequired ||
-        this is ConnectionState.TimedOut ||
-        this is ConnectionState.NotFound ||
-        this is ConnectionState.Disconnected
-
-private val ConnectionState.connectButtonEnabled: Boolean
-    get() = this is ConnectionState.Idle
+private val ConnectionState.showRetry get() =
+    this is ConnectionState.Error || this is ConnectionState.FallbackRequired
+    || this is ConnectionState.TimedOut || this is ConnectionState.NotFound
+    || this is ConnectionState.Disconnected

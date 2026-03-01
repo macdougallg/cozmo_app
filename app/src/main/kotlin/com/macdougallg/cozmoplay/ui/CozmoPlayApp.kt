@@ -1,70 +1,79 @@
 package com.macdougallg.cozmoplay.ui
 
+import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.macdougallg.cozmoplay.ui.navigation.NavRoutes
+import com.macdougallg.cozmoplay.ui.screens.animations.AnimationsScreen
 import com.macdougallg.cozmoplay.ui.screens.connect.ConnectScreen
+import com.macdougallg.cozmoplay.ui.screens.cubes.CubesScreen
+import com.macdougallg.cozmoplay.ui.screens.drive.DriveScreen
+import com.macdougallg.cozmoplay.ui.screens.explore.ExploreScreen
+import com.macdougallg.cozmoplay.ui.screens.home.HomeScreen
+import com.macdougallg.cozmoplay.ui.screens.onboarding.OnboardingScreen
+import com.macdougallg.cozmoplay.ui.screens.settings.SettingsScreen
+import com.macdougallg.cozmoplay.ui.navigation.NavRoutes
 
-/**
- * Root composable. Owns the NavHost and wires all screen destinations.
- *
- * Navigation rules (UI PRD section 2.4):
- * - Entry point is always ConnectScreen
- * - Navigation events come from ViewModels via SharedFlow, never from composables directly
- * - Max depth of 2 taps from HomeScreen to any feature
- *
- * TODO Agent 3: Replace placeholder screens with real implementations.
- */
 @Composable
-fun CozmoPlayApp() {
+fun CozmoPlayApp(context: Context) {
     val navController = rememberNavController()
+    val prefs = context.getSharedPreferences("cozmoplay_settings", Context.MODE_PRIVATE)
+    val onboardingDone = prefs.getBoolean("onboarding_complete", false)
 
-    NavHost(
-        navController = navController,
-        startDestination = NavRoutes.CONNECT,
-    ) {
+    NavHost(navController = navController, startDestination = NavRoutes.CONNECT) {
+
         composable(NavRoutes.CONNECT) {
             ConnectScreen(
-                onConnected = { navController.navigate(NavRoutes.HOME) },
+                onConnected = {
+                    if (onboardingDone) navController.navigate(NavRoutes.HOME) {
+                        popUpTo(NavRoutes.CONNECT) { inclusive = true }
+                    } else navController.navigate(NavRoutes.ONBOARD) {
+                        popUpTo(NavRoutes.CONNECT) { inclusive = true }
+                    }
+                },
                 onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
             )
         }
 
         composable(NavRoutes.ONBOARD) {
-            // TODO Agent 3: Implement OnboardingScreen
-            PlaceholderScreen("Onboarding")
+            OnboardingScreen(
+                onDone = {
+                    navController.navigate(NavRoutes.HOME) {
+                        popUpTo(NavRoutes.ONBOARD) { inclusive = true }
+                    }
+                }
+            )
         }
 
         composable(NavRoutes.HOME) {
-            // TODO Agent 3: Implement HomeScreen
-            PlaceholderScreen("Home")
+            HomeScreen(
+                onNavigateToDrive       = { navController.navigate(NavRoutes.DRIVE) },
+                onNavigateToAnimations  = { navController.navigate(NavRoutes.ANIMATIONS) },
+                onNavigateToExplore     = { navController.navigate(NavRoutes.EXPLORE) },
+                onNavigateToCubes       = { navController.navigate(NavRoutes.CUBES) },
+                onNavigateToSettings    = { navController.navigate(NavRoutes.SETTINGS) },
+            )
         }
 
         composable(NavRoutes.DRIVE) {
-            // TODO Agent 3: Implement DriveScreen
-            PlaceholderScreen("Drive")
+            DriveScreen(onBack = { navController.popBackStack() })
         }
 
         composable(NavRoutes.ANIMATIONS) {
-            // TODO Agent 3: Implement AnimationsScreen
-            PlaceholderScreen("Animations")
+            AnimationsScreen(onBack = { navController.popBackStack() })
         }
 
         composable(NavRoutes.EXPLORE) {
-            // TODO Agent 3: Implement ExploreScreen
-            PlaceholderScreen("Explore")
+            ExploreScreen(onBack = { navController.popBackStack() })
         }
 
         composable(NavRoutes.CUBES) {
-            // TODO Agent 3: Implement CubesScreen
-            PlaceholderScreen("Cubes")
+            CubesScreen(onBack = { navController.popBackStack() })
         }
 
         composable(NavRoutes.SETTINGS) {
-            // TODO Agent 3: Implement SettingsScreen
-            PlaceholderScreen("Settings")
+            SettingsScreen(onBack = { navController.popBackStack() })
         }
     }
 }
