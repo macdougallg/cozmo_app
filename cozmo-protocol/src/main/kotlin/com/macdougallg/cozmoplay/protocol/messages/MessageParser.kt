@@ -1,0 +1,212 @@
+package com.macdougallg.cozmoplay.protocol.messages
+
+import android.util.Log
+import com.macdougallg.cozmoplay.protocol.framing.IncomingMessage
+import com.macdougallg.cozmoplay.types.*
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+/**
+ * Parses raw inbound message payloads into domain objects.
+ *
+ * Each parse function corresponds to a robot → app message type.
+ * Unknown or malformed messages are logged and return null — they never crash the receive loop.
+ *
+ * Reference: PyCozmo clad/robot/messaging.py field definitions.
+ */
+object MessageParser {
+
+    private const val TAG = "MessageParser"
+
+    /**
+     * Dispatch an incoming message to the correct parser.
+     * Returns a [ParsedMessage] or null if the message is unknown/malformed.
+     */
+    fun parse(msg: IncomingMessage): ParsedMessage? {
+        return try {
+            when (msg.messageId) {
+                MessageIds.CONNECTED             -> parseConnected(msg.payload)
+                MessageIds.PONG                  -> parsePong(msg.payload)
+                MessageIds.ROBOT_STATE           -> parseRobotState(msg.payload)
+                MessageIds.ROBOT_OBSERVED_OBJECT -> parseObservedObject(msg.payload)
+                MessageIds.ROBOT_PICKED_UP_OBJECT -> parsePickedUpObject(msg.payload)
+                MessageIds.ROBOT_PLACED_OBJECT   -> parsePlacedObject(msg.payload)
+                MessageIds.ANIMATION_COMPLETED   -> parseAnimationCompleted(msg.payload)
+                MessageIds.ROBOT_COMPLETED_ACTION -> parseCompletedAction(msg.payload)
+                MessageIds.CAMERA_IMAGE          -> parseCameraImage(msg.payload)
+                else -> {
+                    Log.v(TAG, "Unknown message ID: 0x${msg.messageId.toString(16)}")
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse message 0x${msg.messageId.toString(16)}: ${e.message}")
+            null
+        }
+    }
+
+    // ── Parser Functions ──────────────────────────────────────────────────────
+
+    private fun parseConnected(payload: ByteArray): ParsedMessage.Connected {
+        // version(2) + robot_id(4)
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val version = if (buf.remaining() >= 2) buf.short.toInt() else 0
+        val robotId = if (buf.remaining() >= 4) buf.int else 0
+        return ParsedMessage.Connected(version, robotId)
+    }
+
+    private fun parsePong(payload: ByteArray): ParsedMessage.Pong {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val counter = if (buf.remaining() >= 4) buf.int.toUInt() else 0u
+        val timestamp = if (buf.remaining() >= 8) buf.long else 0L
+        return ParsedMessage.Pong(counter, timestamp)
+    }
+
+    private fun parseRobotState(payload: ByteArray): ParsedMessage.RobotStateMsg {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Field order per PyCozmo RobotState message definition
+        val poseX        = buf.float
+        val poseY        = buf.float
+        val poseAngle    = buf.float
+        val headAngle    = buf.float
+        val liftHeight   = buf.float
+        val battery      = buf.float
+        val leftSpeed    = buf.float
+        val rightSpeed   = buf.float
+        val flags        = if (buf.remaining() >= 4) buf.int else 0
+
+        val isCarryingBlock    = (flags and 0x01) != 0
+        val isPickingOrPlacing = (flags and 0x02) != 0
+        val isMoving           = (flags and 0x04) != 0
+        val isAnimating        = (flags and 0x08) != 0
+        val emotionBits        = (flags shr 8) and 0xFF
+        val emotion            = emotionFromBits(emotionBits)
+
+        return ParsedMessage.RobotStateMsg(
+            RobotState(
+                poseX = poseX,
+                poseY = poseY,
+                poseAngle = poseAngle,
+                headAngle = headAngle,
+                liftHeight = liftHeight,
+                batteryVoltage = battery,
+                isCarryingBlock = isCarryingBlock,
+                isPickingOrPlacing = isPickingOrPlacing,
+                isMoving = isMoving,
+                isAnimating = isAnimating,
+                leftWheelSpeed = leftSpeed,
+                rightWheelSpeed = rightSpeed,
+                emotion = emotion,
+            )
+        )
+    }
+
+    private fun parseObservedObject(payload: ByteArray): ParsedMessage.ObservedObject {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val objectId      = buf.int
+        val cubeId        = if (buf.remaining() >= 4) buf.int else objectId
+        val isVisible     = if (buf.remaining() >= 1) buf.get().toInt() != 0 else true
+        val signalStr     = if (buf.remaining() >= 4) buf.float else 1f
+        return ParsedMessage.ObservedObject(
+            objectId = objectId,
+            cubeId = cubeId,
+            isVisible = isVisible,
+            signalStrength = signalStr,
+            lastSeenMs = System.currentTimeMillis(),
+        )
+    }
+
+    private fun parsePickedUpObject(payload: ByteArray): ParsedMessage.PickedUpObject {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val objectId = if (buf.remaining() >= 4) buf.int else -1
+        return ParsedMessage.PickedUpObject(objectId)
+    }
+
+    private fun parsePlacedObject(payload: ByteArray): ParsedMessage.PlacedObject {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val objectId = if (buf.remaining() >= 4) buf.int else -1
+        return ParsedMessage.PlacedObject(objectId)
+    }
+
+    private fun parseAnimationCompleted(payload: ByteArray): ParsedMessage.AnimationCompleted {
+        // name string (null-terminated) + result byte
+        val nullIdx = payload.indexOf(0)
+        val nameBytes = if (nullIdx > 0) payload.copyOf(nullIdx) else payload
+        val name = String(nameBytes, Charsets.UTF_8)
+        val resultByte = if (nullIdx >= 0 && nullIdx + 1 < payload.size)
+            payload[nullIdx + 1].toInt() else 0
+        val result = if (resultByte == 0) ActionResult.Success
+                     else ActionResult.Failure("Animation result code: $resultByte")
+        return ParsedMessage.AnimationCompleted(name, result)
+    }
+
+    private fun parseCompletedAction(payload: ByteArray): ParsedMessage.CompletedAction {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val actionId   = if (buf.remaining() >= 4) buf.int else -1
+        val resultCode = if (buf.remaining() >= 1) buf.get().toInt() else 0
+        val result = when (resultCode) {
+            0    -> ActionResult.Success
+            1    -> ActionResult.Failure("Action failed (code 1)")
+            else -> ActionResult.Failure("Action failed (code $resultCode)")
+        }
+        return ParsedMessage.CompletedAction(actionId, result)
+    }
+
+    private fun parseCameraImage(payload: ByteArray): ParsedMessage.CameraImage {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val imageId = if (buf.remaining() >= 4) buf.int else 0
+        val width   = if (buf.remaining() >= 2) buf.short.toInt() and 0xFFFF else 320
+        val height  = if (buf.remaining() >= 2) buf.short.toInt() and 0xFFFF else 240
+        val jpegData = if (buf.remaining() > 0) {
+            val remaining = buf.remaining()
+            ByteArray(remaining).also { buf.get(it) }
+        } else ByteArray(0)
+        return ParsedMessage.CameraImage(imageId, width, height, jpegData)
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun emotionFromBits(bits: Int): Emotion = when (bits) {
+        1    -> Emotion.HAPPY
+        2    -> Emotion.EXCITED
+        3    -> Emotion.ANGRY
+        4    -> Emotion.SAD
+        5    -> Emotion.SURPRISED
+        6    -> Emotion.BORED
+        7    -> Emotion.SCARED
+        else -> Emotion.NEUTRAL
+    }
+}
+
+// ── Parsed message sealed class ───────────────────────────────────────────────
+
+sealed class ParsedMessage {
+    data class Connected(val version: Int, val robotId: Int) : ParsedMessage()
+    data class Pong(val counter: UInt, val timestamp: Long) : ParsedMessage()
+    data class RobotStateMsg(val state: RobotState) : ParsedMessage()
+    data class ObservedObject(
+        val objectId: Int,
+        val cubeId: Int,
+        val isVisible: Boolean,
+        val signalStrength: Float,
+        val lastSeenMs: Long,
+    ) : ParsedMessage()
+    data class PickedUpObject(val objectId: Int) : ParsedMessage()
+    data class PlacedObject(val objectId: Int) : ParsedMessage()
+    data class AnimationCompleted(val name: String, val result: ActionResult) : ParsedMessage()
+    data class CompletedAction(val actionId: Int, val result: ActionResult) : ParsedMessage()
+    data class CameraImage(
+        val imageId: Int,
+        val width: Int,
+        val height: Int,
+        val jpegData: ByteArray,
+    ) : ParsedMessage() {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is CameraImage) return false
+            return imageId == other.imageId && jpegData.contentEquals(other.jpegData)
+        }
+        override fun hashCode(): Int = 31 * imageId + jpegData.contentHashCode()
+    }
+}
