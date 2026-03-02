@@ -1,5 +1,6 @@
 package com.macdougallg.cozmoplay.protocol.messages
 
+import com.macdougallg.cozmoplay.types.CubeLightConfig
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -116,6 +117,71 @@ object MessageBuilder {
         buf.putShort(exposureMs.toShort())
         buf.put(if (autoExposure) 1 else 0)
         return buf.array()
+    }
+
+    // ── Cube ──────────────────────────────────────────────────────────────────
+
+    /**
+     * CubeLights — 40 bytes (4 × 10-byte LightState).
+     *
+     * Wire format per LightState (little-endian):
+     *   on_color              uint16  — RGB555 packed: (r5<<10)|(g5<<5)|b5
+     *   off_color             uint16  — RGB555; 0 = black (use for blink-off or solid)
+     *   on_frames             uint8   — frames in "on" color (~33ms/frame); 255 = always on
+     *   off_frames            uint8   — frames in "off" color; 0 = no off phase (solid)
+     *   transition_on_frames  uint8   — crossfade into on state
+     *   transition_off_frames uint8   — crossfade into off state
+     *   offset                int16   — frame offset for chase effects; 0 = no offset
+     *
+     * If fewer than 4 [CubeLightConfig]s are given, the last one is repeated.
+     */
+    fun cubeLights(lights: List<CubeLightConfig>): ByteArray {
+        require(lights.isNotEmpty())
+        val buf = ByteBuffer.allocate(40).order(ByteOrder.LITTLE_ENDIAN)
+        repeat(4) { i ->
+            val cfg = lights.getOrElse(i) { lights.last() }
+            val onColor  = argbToRgb555(cfg.color)
+            val offColor = 0  // black when off
+            val onFrames  = if (cfg.offPeriodMs <= 0) 255
+                            else (cfg.onPeriodMs  / 33).coerceIn(1, 255)
+            val offFrames = (cfg.offPeriodMs  / 33).coerceIn(0, 255)
+            val transFrames = (cfg.transitionMs / 33).coerceIn(0, 255)
+            buf.putShort(onColor.toShort())
+            buf.putShort(offColor.toShort())
+            buf.put(onFrames.toByte())
+            buf.put(offFrames.toByte())
+            buf.put(transFrames.toByte())   // transition_on_frames
+            buf.put(transFrames.toByte())   // transition_off_frames
+            buf.putShort(0)                 // offset
+        }
+        return buf.array()
+    }
+
+    /** ObjectConnect — 5 bytes. Connect (or disconnect) to a cube by factory ID. */
+    fun objectConnect(factoryId: Int, connect: Boolean): ByteArray {
+        val buf = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(factoryId)
+        buf.put(if (connect) 1 else 0)
+        return buf.array()
+    }
+
+    /**
+     * CubeId — 5 bytes. Registers a cube's runtime object_id with the robot.
+     * Must be sent after ObjectConnectionState is received. rotationPeriodFrames=0 disables rotation.
+     */
+    fun cubeId(objectId: Int, rotationPeriodFrames: Int = 0): ByteArray {
+        val buf = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(objectId)
+        buf.put(rotationPeriodFrames.toByte())
+        return buf.array()
+    }
+
+    /** Convert packed ARGB int to RGB555 uint16: (r5<<10)|(g5<<5)|b5. */
+    private fun argbToRgb555(argb: Int): Int {
+        val r = (argb shr 16) and 0xFF
+        val g = (argb shr 8)  and 0xFF
+        val b =  argb         and 0xFF
+        return ((r * 31 / 255) shl 10) or ((g * 31 / 255) shl 5) or (b * 31 / 255)
     }
 
     // ── Init sequence ─────────────────────────────────────────────────────────

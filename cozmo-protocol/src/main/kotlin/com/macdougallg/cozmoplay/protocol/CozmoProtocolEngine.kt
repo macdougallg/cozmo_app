@@ -99,6 +99,9 @@ class CozmoProtocolEngine : ICozmoProtocol {
     private val imageChunkBuffers = LinkedHashMap<Int, ImageFrameBuffer>()
     private val IMAGE_BUFFER_MAX = 4
 
+    // Cube tracking — accessed only from receive loop (single coroutine), no locking needed
+    private val cubeRssiByFactory = HashMap<Int, Int>() // factory_id → rssi (dBm)
+
     // Pending action completions
     private var pendingAnimation: CompletableDeferred<ActionResult>? = null
     private var pendingAction: CompletableDeferred<ActionResult>? = null
@@ -420,25 +423,128 @@ class CozmoProtocolEngine : ICozmoProtocol {
     }
 
     // ── Cube Commands ─────────────────────────────────────────────────────────
+    //
+    // PickupObject, PlaceObject, and RollObject do not exist as wire protocol commands.
+    // The robot's onboard behavior engine handles object interaction; the protocol only
+    // exposes raw motor/lift primitives. These are implemented as motor sequences.
 
     override fun setCubeLights(objectId: Int, lights: List<CubeLightConfig>) {
-        // Cube light command not yet mapped — stub
-        Log.w(TAG, "setCubeLights not yet implemented for real hardware")
+        if (!isConnected() || lights.isEmpty()) return
+        Log.d(TAG, "setCubeLights: object=$objectId lights=${lights.size}")
+        sendCommand(CommandIds.CUBE_LIGHTS, MessageBuilder.cubeLights(lights))
     }
 
     override suspend fun pickupObject(objectId: Int): ActionResult {
-        Log.w(TAG, "pickupObject not yet implemented for real hardware")
-        return ActionResult.Failure("Not implemented")
+        if (!isConnected()) return ActionResult.Failure("Not connected")
+        Log.i(TAG, "pickupObject: $objectId")
+        return try {
+            withTimeout(ACTION_TIMEOUT_MS) {
+                setLiftHeight(32f); delay(500)       // lower lift to floor
+                driveWheels(90f, 90f); delay(500)   // approach
+                stopAllMotors()
+                setLiftHeight(90f); delay(1000)      // raise lift (carry cube)
+                ActionResult.Success
+            }
+        } catch (_: TimeoutCancellationException) { ActionResult.Timeout }
     }
 
     override suspend fun placeObject(): ActionResult {
-        Log.w(TAG, "placeObject not yet implemented for real hardware")
-        return ActionResult.Failure("Not implemented")
+        if (!isConnected()) return ActionResult.Failure("Not connected")
+        Log.i(TAG, "placeObject")
+        return try {
+            withTimeout(ACTION_TIMEOUT_MS) {
+                setLiftHeight(32f); delay(800)       // lower lift (set cube down)
+                driveWheels(-80f, -80f); delay(400) // back away
+                stopAllMotors()
+                ActionResult.Success
+            }
+        } catch (_: TimeoutCancellationException) { ActionResult.Timeout }
     }
 
     override suspend fun rollObject(objectId: Int): ActionResult {
-        Log.w(TAG, "rollObject not yet implemented for real hardware")
-        return ActionResult.Failure("Not implemented")
+        if (!isConnected()) return ActionResult.Failure("Not connected")
+        Log.i(TAG, "rollObject: $objectId")
+        return try {
+            withTimeout(ACTION_TIMEOUT_MS) {
+                setLiftHeight(32f); delay(300)        // lower lift to push height
+                driveWheels(160f, 160f); delay(600)  // push cube
+                stopAllMotors()
+                driveWheels(-80f, -80f); delay(300)  // back up
+                stopAllMotors()
+                ActionResult.Success
+            }
+        } catch (_: TimeoutCancellationException) { ActionResult.Timeout }
+    }
+
+    // ── Cube Event Parsing ────────────────────────────────────────────────────
+
+    /**
+     * ObjectAvailable (0xf3) — robot detected a cube via BLE advertisement.
+     * Wire format: factory_id(uint32) + object_type(int32) + rssi(int8) = 9 bytes.
+     * Auto-connect to any light cube (object_type 1-3).
+     */
+    private fun parseObjectAvailable(payload: ByteArray) {
+        if (payload.size < 9) { Log.w(TAG, "ObjectAvailable too short: ${payload.size}B"); return }
+        val buf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val factoryId  = buf.getInt()
+        val objectType = buf.getInt()  // 1=LIGHTCUBE1, 2=LIGHTCUBE2, 3=LIGHTCUBE3
+        val rssi       = buf.get().toInt()  // signed dBm
+        Log.d(TAG, "ObjectAvailable: factory=0x${factoryId.toUInt().toString(16)} type=$objectType rssi=$rssi")
+
+        if (objectType in 1..3) {
+            cubeRssiByFactory[factoryId] = rssi
+            Log.i(TAG, "Auto-connecting to cube (factory=0x${factoryId.toUInt().toString(16)})")
+            sendCommand(CommandIds.OBJECT_CONNECT, MessageBuilder.objectConnect(factoryId, true))
+        }
+    }
+
+    /**
+     * ObjectConnectionState (0xd0) — cube connected or disconnected.
+     * Wire format: object_id(uint32) + factory_id(uint32) + object_type(int32) + connected(bool) = 13 bytes.
+     * On connect: populate _cubeStates and send CubeId to register with robot.
+     */
+    private fun parseObjectConnectionState(payload: ByteArray) {
+        if (payload.size < 13) { Log.w(TAG, "ObjectConnectionState too short: ${payload.size}B"); return }
+        val buf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val objectId   = buf.getInt()
+        val factoryId  = buf.getInt()
+        val objectType = buf.getInt()  // 1-3
+        val connected  = buf.get().toInt() != 0
+        Log.d(TAG, "ObjectConnectionState: object=$objectId factory=0x${factoryId.toUInt().toString(16)} type=$objectType connected=$connected")
+
+        val cubeId = objectType.coerceIn(1, 3)
+        val rssi   = cubeRssiByFactory[factoryId] ?: -70
+        // Map RSSI (roughly -100 dBm = 0 to -30 dBm = 1.0) to signal strength
+        val signalStrength = ((rssi + 100) / 70f).coerceIn(0f, 1f)
+
+        scope.launch(Dispatchers.Main) {
+            val current = _cubeStates.value.toMutableList()
+            val idx = current.indexOfFirst { it.objectId == objectId }
+            if (connected) {
+                val state = CubeState(
+                    cubeId          = cubeId,
+                    objectId        = objectId,
+                    isVisible       = true,
+                    isBeingCarried  = false,
+                    lightState      = CubeLightState(color = 0xFF0000FF.toInt(), isFlashing = false, flashOnMs = 0, flashOffMs = 0),
+                    signalStrength  = signalStrength,
+                    lastSeenMs      = System.currentTimeMillis(),
+                )
+                if (idx >= 0) current[idx] = state else current.add(state)
+                Log.i(TAG, "Cube $cubeId connected (object=$objectId signal=${"%.0f".format(signalStrength * 100)}%)")
+            } else {
+                if (idx >= 0) {
+                    current[idx] = current[idx].copy(isVisible = false)
+                    Log.i(TAG, "Cube $cubeId disconnected (object=$objectId)")
+                }
+            }
+            _cubeStates.value = current
+        }
+
+        if (connected) {
+            // Register cube — required before sending CubeLights or other cube commands
+            sendCommand(CommandIds.CUBE_ID, MessageBuilder.cubeId(objectId))
+        }
     }
 
     // ── Camera ────────────────────────────────────────────────────────────────
@@ -539,8 +645,8 @@ class CozmoProtocolEngine : ICozmoProtocol {
             EventIds.ANIMATION_STATE       -> Log.d(TAG, "AnimationState (0xf1) received (${payload.size} bytes)")
             EventIds.ANIMATION_STARTED     -> Log.d(TAG, "AnimationStarted: id=${payload.firstOrNull()?.toInt()?.and(0xFF)}")
             EventIds.ANIMATION_ENDED       -> Log.d(TAG, "AnimationEnded:   id=${payload.firstOrNull()?.toInt()?.and(0xFF)}")
-            EventIds.OBJECT_AVAILABLE      -> Log.d(TAG, "ObjectAvailable received")
-            EventIds.OBJECT_CONNECTION_STATE -> Log.d(TAG, "ObjectConnectionState received")
+            EventIds.OBJECT_AVAILABLE        -> parseObjectAvailable(payload)
+            EventIds.OBJECT_CONNECTION_STATE -> parseObjectConnectionState(payload)
             EventIds.ACKNOWLEDGE_ACTION    -> Log.d(TAG, "AcknowledgeAction received")
             // Initial-burst info packets (robot sends these right after RESET)
             EventIds.HARDWARE_INFO         -> Log.d(TAG, "HardwareInfo received (${payload.size}B)")

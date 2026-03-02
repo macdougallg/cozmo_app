@@ -28,6 +28,12 @@ object CommandIds {
     const val DRIVE_LIFT: Byte       = 0x34         //  4 bytes: speed (float)
     const val SET_LIFT_HEIGHT: Byte  = 0x36         // 17 bytes: height,maxSpeed,accel,duration (4×float) + actionId (uint8)
 
+    // ── Cube ──────────────────────────────────────────────────────────────────
+    // CubeLights has no object_id field — it targets whatever cube is currently connected.
+    const val CUBE_LIGHTS: Byte    = 0x04    // 40 bytes: 4 × LightState (on_color/off_color RGB555, on/off/transition frames, offset)
+    const val OBJECT_CONNECT: Byte = 0x05    //  5 bytes: factory_id (uint32) + connect (bool)
+    const val CUBE_ID: Byte        = 0x10    //  5 bytes: object_id (uint32) + rotation_period_frames (uint8) — must send after ObjectConnectionState
+
     // ── Animations ────────────────────────────────────────────────────────────
     // Note: Cozmo has no built-in named animations. The robot plays animation data
     // streamed frame-by-frame from the host. START_ANIMATION begins a stream session;
