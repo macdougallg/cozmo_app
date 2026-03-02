@@ -46,7 +46,7 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
     override val isConnected: Boolean get() = _connectionState.value is ConnectionState.Connected
-    override val cozmoIpAddress: String = "192.168.1.1"
+    override val cozmoIpAddress: String = "172.31.1.1"
     override val cozmoPort: Int = 5551
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -76,6 +76,7 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
         connectJob?.cancel()
         pollJob?.cancel()
         unregisterCallback()
+        connectivityManager.bindProcessToNetwork(null)
         cozmoNetwork = null
         emit(ConnectionState.Disconnected)
     }
@@ -84,14 +85,23 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
         connectJob?.cancel()
         pollJob?.cancel()
         unregisterCallback()
+        connectivityManager.bindProcessToNetwork(null)
         cozmoNetwork = null
         scope.cancel()
         emit(ConnectionState.Idle)
     }
 
     override fun createBoundSocket(): DatagramSocket {
+        // Always try a fresh lookup — the stored reference may be stale if the OS
+        // invalidated the Network object (common on Fire OS after ~10s with no internet).
+        val fresh = findCozmoNetworkInConnectedNetworks()
+        if (fresh != null && fresh != cozmoNetwork) {
+            Log.d(TAG, "createBoundSocket: refreshed stale network reference")
+            cozmoNetwork = fresh
+            connectivityManager.bindProcessToNetwork(fresh)
+        }
         val net = cozmoNetwork ?: throw CozmoNotConnectedException(
-            "createBoundSocket() called but cozmoNetwork is null — not connected")
+            "createBoundSocket() called but no Cozmo network available")
         return DatagramSocket().also { socket ->
             net.bindSocket(socket)
             Log.d(TAG, "UDP socket bound to Cozmo network")
@@ -273,6 +283,12 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
                 if (cozmoNet != null) {
                     Log.i(TAG, "Manual connection detected via poll")
                     cozmoNetwork = cozmoNet
+                    // Bind the process so Fire OS doesn't reroute new connections.
+                    connectivityManager.bindProcessToNetwork(cozmoNet)
+                    Log.d(TAG, "Process bound to Cozmo network")
+                    // Register a requestNetwork callback so the OS keeps this network alive.
+                    // Without this, Fire OS aggressively drops WiFi with no internet after ~10s.
+                    registerKeepAliveCallback()
                     emit(ConnectionState.Connected)
                     return@launch
                 }
@@ -318,6 +334,53 @@ class CozmoWifiManager(private val context: Context) : ICozmoWifi {
         }
         return wifiManager.connectionInfo?.ssid?.removeSurrounding("\"")
             ?.takeIf { it.isNotEmpty() && it != "<unknown ssid>" }
+    }
+
+    // ── Keep-alive ────────────────────────────────────────────────────────────
+
+    /**
+     * Registers a [ConnectivityManager.requestNetwork] callback targeting any WiFi
+     * network without internet. This signals to the OS "don't drop this network" and
+     * receives [onLost] if the robot's hotspot disappears.
+     *
+     * Must be called AFTER the Cozmo network is already found via polling, so the
+     * OS can match the request to the already-connected Cozmo hotspot.
+     */
+    private fun registerKeepAliveCallback() {
+        unregisterCallback() // clean up any previous (e.g. from prior attempt)
+
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                Log.d(TAG, "Keep-alive onAvailable: updating cozmoNetwork → $network")
+                cozmoNetwork = network
+                connectivityManager.bindProcessToNetwork(network)
+                // Fire OS sometimes does a quick onLost+onAvailable cycle (OS re-grants the network
+                // within a few seconds). If we're already in a reconnect flow, cancel it and recover.
+                if (_connectionState.value is ConnectionState.Scanning) {
+                    Log.i(TAG, "Keep-alive re-granted — recovering to Connected, cancelling reconnect")
+                    connectJob?.cancel()
+                    emit(ConnectionState.Connected)
+                }
+            }
+            override fun onLost(network: Network) {
+                Log.w(TAG, "Keep-alive onLost: Cozmo network dropped by OS")
+                cozmoNetwork = null
+                handleConnectionLost()
+            }
+        }
+
+        networkCallback = callback
+        try {
+            connectivityManager.requestNetwork(request, callback)
+            Log.d(TAG, "Keep-alive network request registered")
+        } catch (e: Exception) {
+            Log.w(TAG, "registerKeepAliveCallback failed: ${e.message}")
+        }
     }
 
     // ── Reconnection ──────────────────────────────────────────────────────────

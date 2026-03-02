@@ -2,8 +2,8 @@ package com.macdougallg.cozmoplay.protocol
 
 import app.cash.turbine.test
 import com.macdougallg.cozmoplay.protocol.framing.FrameCodec
+import com.macdougallg.cozmoplay.protocol.messages.CommandIds
 import com.macdougallg.cozmoplay.protocol.messages.MessageBuilder
-import com.macdougallg.cozmoplay.protocol.messages.MessageIds
 import com.macdougallg.cozmoplay.types.*
 import com.macdougallg.cozmoplay.wifi.MockCozmoWifi
 import kotlinx.coroutines.test.runTest
@@ -16,54 +16,68 @@ import java.nio.ByteOrder
 class FrameCodecTest {
 
     @Test
-    fun `encode produces correct frame header`() {
-        val frame = FrameCodec.encode(
-            frameId = 1u,
-            ackId = 0u,
-            messageId = MessageIds.CONNECT,
-            payload = ByteArray(0),
-        )
-        val buf = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
-        assertEquals(1, buf.int)           // frameId
-        assertEquals(0, buf.int)           // ackId
-        assertEquals(1, buf.get().toInt()) // message count
-        assertEquals(MessageIds.CONNECT.toShort(), buf.short) // messageId
-        assertEquals(0, buf.short.toInt()) // payload length
+    fun `encodeReset produces 14-byte frame with correct magic and type`() {
+        val frame = FrameCodec.encodeReset()
+        assertEquals(FrameCodec.HEADER_SIZE, frame.size)
+        // Magic: "COZ\x03RE\x01"
+        assertEquals(0x43.toByte(), frame[0])
+        assertEquals(0x4F.toByte(), frame[1])
+        assertEquals(0x5A.toByte(), frame[2])
+        assertEquals(0x03.toByte(), frame[3])
+        assertEquals(0x52.toByte(), frame[4])
+        assertEquals(0x45.toByte(), frame[5])
+        assertEquals(0x01.toByte(), frame[6])
+        assertEquals(FrameCodec.FRAME_RESET, frame[7])
     }
 
     @Test
-    fun `decode round-trips a CONNECT frame`() {
-        val payload = MessageBuilder.connect()
-        val frame = FrameCodec.encode(42u, 7u, MessageIds.CONNECT, payload)
-        val result = FrameCodec.decode(frame)
-        assertNotNull(result)
-        assertEquals(42u, result!!.frameId)
-        assertEquals(7u, result.ackId)
-        assertEquals(1, result.messages.size)
-        assertEquals(MessageIds.CONNECT, result.messages[0].messageId)
-        assertTrue(result.messages[0].payload.contentEquals(payload))
+    fun `encodeCommand decode round-trip preserves id and payload`() {
+        val payload = MessageBuilder.driveWheels(100f, -50f)
+        val frame = FrameCodec.encodeCommand(CommandIds.DRIVE_WHEELS, payload, seq = 1, ack = 0)
+        val decoded = FrameCodec.decode(frame)
+        assertNotNull(decoded)
+        assertEquals(FrameCodec.FRAME_ENGINE_PACKETS, decoded!!.frameType)
+        assertEquals(1, decoded.packets.size)
+        val pkt = decoded.packets[0]
+        assertEquals(FrameCodec.PACKET_COMMAND, pkt.type)
+        assertEquals(CommandIds.DRIVE_WHEELS, pkt.id)
+        assertTrue(pkt.payload.contentEquals(payload))
+    }
+
+    @Test
+    fun `encodePing decode round-trip preserves frame type`() {
+        val pingPayload = MessageBuilder.ping(1u)
+        val frame = FrameCodec.encodePing(pingPayload, ack = 0)
+        val decoded = FrameCodec.decode(frame)
+        assertNotNull(decoded)
+        assertEquals(FrameCodec.FRAME_OOB_PING, decoded!!.frameType)
+        assertEquals(1, decoded.packets.size)
+        assertEquals(FrameCodec.PACKET_PING, decoded.packets[0].type)
     }
 
     @Test
     fun `decode returns null for frame too short`() {
-        val result = FrameCodec.decode(ByteArray(5))
-        assertNull(result)
+        assertNull(FrameCodec.decode(ByteArray(5)))
     }
 
     @Test
-    fun `decode handles empty frame gracefully`() {
-        val result = FrameCodec.decode(ByteArray(0))
-        assertNull(result)
+    fun `decode returns null for empty frame`() {
+        assertNull(FrameCodec.decode(ByteArray(0)))
     }
 
     @Test
-    fun `encode is little-endian`() {
-        val frame = FrameCodec.encode(0x01020304u, 0u, 0x0001u, ByteArray(0))
-        // First byte of frameId should be 0x04 in little-endian
-        assertEquals(0x04.toByte(), frame[0])
-        assertEquals(0x03.toByte(), frame[1])
-        assertEquals(0x02.toByte(), frame[2])
-        assertEquals(0x01.toByte(), frame[3])
+    fun `sequence encoding — OOB_SEQ ack encodes as wire value 0`() {
+        // encodeReset: firstSeq=0, seq=0, ack=OOB_SEQ(0xffff)
+        // ack wire = (0xffff + 1) % 0x10000 = 0
+        val frame = FrameCodec.encodeReset()
+        val buf = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
+        buf.position(8) // skip magic(7) + type(1)
+        val firstSeqWire = buf.short.toInt() and 0xffff
+        val seqWire      = buf.short.toInt() and 0xffff
+        val ackWire      = buf.short.toInt() and 0xffff
+        assertEquals(1, firstSeqWire) // (0+1)%0x10000 = 1
+        assertEquals(1, seqWire)
+        assertEquals(0, ackWire)      // (0xffff+1)%0x10000 = 0
     }
 }
 
@@ -79,7 +93,7 @@ class MessageBuilderTest {
 
     @Test
     fun `setHeadAngle clamps to valid range`() {
-        val payload = MessageBuilder.setHeadAngle(5f) // way over max 0.78
+        val payload = MessageBuilder.setHeadAngle(5f) // above max 0.78
         val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(0.78f, buf.float, 0.01f)
     }
@@ -92,36 +106,29 @@ class MessageBuilderTest {
     }
 
     @Test
-    fun `playAnimation encodes name as null-terminated string`() {
-        val name = "anim_happy_01"
-        val payload = MessageBuilder.playAnimation(name)
-        val nameBytes = name.toByteArray(Charsets.UTF_8)
-        assertEquals(nameBytes.size + 1, payload.size)
-        assertEquals(0.toByte(), payload.last()) // null terminator
-        assertTrue(payload.copyOf(nameBytes.size).contentEquals(nameBytes))
-    }
-
-    @Test
-    fun `disconnect produces empty payload`() {
-        assertEquals(0, MessageBuilder.disconnect().size)
-    }
-
-    @Test
     fun `stopAllMotors produces empty payload`() {
         assertEquals(0, MessageBuilder.stopAllMotors().size)
     }
 
     @Test
-    fun `enableCamera true encodes 1`() {
+    fun `enableCamera true encodes stream mode and 320x240 resolution`() {
         val payload = MessageBuilder.enableCamera(true)
-        assertEquals(1, payload.size)
-        assertEquals(1.toByte(), payload[0])
+        assertEquals(2, payload.size)
+        assertEquals(2.toByte(), payload[0]) // mode 2 = stream
+        assertEquals(0.toByte(), payload[1]) // resolution 0 = 320x240
     }
 
     @Test
-    fun `enableCamera false encodes 0`() {
+    fun `enableCamera false encodes off mode`() {
         val payload = MessageBuilder.enableCamera(false)
-        assertEquals(0.toByte(), payload[0])
+        assertEquals(2, payload.size)
+        assertEquals(0.toByte(), payload[0]) // mode 0 = off
+    }
+
+    @Test
+    fun `ping produces 17 bytes`() {
+        val payload = MessageBuilder.ping(42u)
+        assertEquals(17, payload.size)
     }
 }
 

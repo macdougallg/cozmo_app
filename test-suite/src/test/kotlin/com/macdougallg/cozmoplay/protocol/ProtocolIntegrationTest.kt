@@ -2,12 +2,13 @@ package com.macdougallg.cozmoplay.protocol
 
 import app.cash.turbine.test
 import com.macdougallg.cozmoplay.protocol.framing.FrameCodec
+import com.macdougallg.cozmoplay.protocol.framing.IncomingPacket
 import com.macdougallg.cozmoplay.protocol.messages.AnimationManifest
+import com.macdougallg.cozmoplay.protocol.messages.CommandIds
+import com.macdougallg.cozmoplay.protocol.messages.EventIds
 import com.macdougallg.cozmoplay.protocol.messages.MessageBuilder
-import com.macdougallg.cozmoplay.protocol.messages.MessageIds
 import com.macdougallg.cozmoplay.protocol.messages.MessageParser
 import com.macdougallg.cozmoplay.protocol.messages.ParsedMessage
-import com.macdougallg.cozmoplay.protocol.framing.IncomingMessage
 import com.macdougallg.cozmoplay.types.*
 import com.macdougallg.cozmoplay.wifi.MockCozmoWifi
 import kotlinx.coroutines.test.runTest
@@ -338,126 +339,119 @@ class ProtocolIntegrationTest {
 class FrameCodecIntegrationTest {
 
     @Test
-    fun `all outbound message types encode without error`() {
-        val messages = listOf(
-            MessageIds.CONNECT       to MessageBuilder.connect(),
-            MessageIds.DISCONNECT    to MessageBuilder.disconnect(),
-            MessageIds.PING          to MessageBuilder.ping(1u, System.currentTimeMillis()),
-            MessageIds.DRIVE_WHEELS  to MessageBuilder.driveWheels(100f, -100f),
-            MessageIds.STOP_ALL_MOTORS to MessageBuilder.stopAllMotors(),
-            MessageIds.SET_HEAD_ANGLE to MessageBuilder.setHeadAngle(0.3f),
-            MessageIds.MOVE_HEAD     to MessageBuilder.moveHead(1f),
-            MessageIds.SET_LIFT_HEIGHT to MessageBuilder.setLiftHeight(60f),
-            MessageIds.MOVE_LIFT     to MessageBuilder.moveLift(0.5f),
-            MessageIds.PLAY_ANIMATION to MessageBuilder.playAnimation("anim_happy_01"),
-            MessageIds.SET_CUBE_LIGHTS to MessageBuilder.setCubeLights(101,
-                listOf(CubeLightConfig(0xFF0000))),
-            MessageIds.PICKUP_OBJECT to MessageBuilder.pickupObject(101),
-            MessageIds.PLACE_OBJECT  to MessageBuilder.placeObject(),
-            MessageIds.ROLL_OBJECT   to MessageBuilder.rollObject(101),
-            MessageIds.ENABLE_CAMERA to MessageBuilder.enableCamera(true),
-            MessageIds.ENABLE_FREEPLAY to MessageBuilder.enableFreeplay(true),
+    fun `all drive command types encode and decode without error`() {
+        val commands = listOf(
+            CommandIds.DRIVE_WHEELS    to MessageBuilder.driveWheels(100f, -100f),
+            CommandIds.STOP_ALL_MOTORS to MessageBuilder.stopAllMotors(),
+            CommandIds.DRIVE_HEAD      to MessageBuilder.driveHead(1f),
+            CommandIds.SET_HEAD_ANGLE  to MessageBuilder.setHeadAngle(0.3f),
+            CommandIds.DRIVE_LIFT      to MessageBuilder.driveLift(0.5f),
+            CommandIds.SET_LIFT_HEIGHT to MessageBuilder.setLiftHeight(60f),
+            CommandIds.ENABLE_CAMERA   to MessageBuilder.enableCamera(true),
         )
-        messages.forEachIndexed { index, (msgId, payload) ->
-            val frame = FrameCodec.encode(index.toUInt(), 0u, msgId, payload)
+        commands.forEachIndexed { index, (cmdId, payload) ->
+            val frame = FrameCodec.encodeCommand(cmdId, payload, seq = index + 1, ack = 0)
             val decoded = FrameCodec.decode(frame)
-            assertNotNull("Frame $index ($msgId) failed to decode", decoded)
-            assertEquals(1, decoded!!.messages.size)
-            assertEquals(msgId, decoded.messages[0].messageId)
-            assertTrue(decoded.messages[0].payload.contentEquals(payload))
+            assertNotNull("Command $index ($cmdId) failed to decode", decoded)
+            assertEquals(FrameCodec.FRAME_ENGINE_PACKETS, decoded!!.frameType)
+            assertEquals(1, decoded.packets.size)
+            val pkt = decoded.packets[0]
+            assertEquals(FrameCodec.PACKET_COMMAND, pkt.type)
+            assertEquals(cmdId, pkt.id)
+            assertTrue("Command $index payload mismatch", pkt.payload.contentEquals(payload))
         }
     }
 
     @Test
-    fun `frameId increments correctly across multiple frames`() {
-        (1..10).forEach { id ->
-            val frame = FrameCodec.encode(id.toUInt(), 0u, MessageIds.PING,
-                MessageBuilder.ping(id.toUInt(), 0L))
+    fun `sequence numbers round-trip through encode and decode`() {
+        (1..10).forEach { seq ->
+            val frame = FrameCodec.encodeCommand(
+                CommandIds.STOP_ALL_MOTORS, MessageBuilder.stopAllMotors(), seq = seq, ack = 0)
             val decoded = FrameCodec.decode(frame)!!
-            assertEquals(id.toUInt(), decoded.frameId)
+            assertEquals(seq, decoded.seq)
         }
     }
 
     @Test
-    fun `ackId is preserved in decoded frame`() {
-        val frame = FrameCodec.encode(1u, 42u, MessageIds.PING, MessageBuilder.ping(1u, 0L))
+    fun `ack field is preserved in decoded frame`() {
+        val frame = FrameCodec.encodeCommand(
+            CommandIds.STOP_ALL_MOTORS, MessageBuilder.stopAllMotors(), seq = 1, ack = 42)
         val decoded = FrameCodec.decode(frame)!!
-        assertEquals(42u, decoded.ackId)
+        assertEquals(42, decoded.ack)
+    }
+
+    @Test
+    fun `ping frame encodes and decodes correctly`() {
+        val pingPayload = MessageBuilder.ping(7u)
+        val frame = FrameCodec.encodePing(pingPayload, ack = 5)
+        val decoded = FrameCodec.decode(frame)!!
+        assertEquals(FrameCodec.FRAME_OOB_PING, decoded.frameType)
+        assertEquals(FrameCodec.OOB_SEQ, decoded.seq)
+        assertEquals(5, decoded.ack)
+        assertEquals(1, decoded.packets.size)
+        assertEquals(FrameCodec.PACKET_PING, decoded.packets[0].type)
     }
 }
 
 /**
- * MessageParser tests — validates inbound message parsing.
+ * MessageParser tests — validates inbound packet parsing.
  */
 class MessageParserIntegrationTest {
 
     @Test
-    fun `unknown message ID returns null without throwing`() {
-        val msg = IncomingMessage(0xFFFFu, ByteArray(0))
-        val result = MessageParser.parse(msg)
+    fun `unknown packet type returns null without throwing`() {
+        val pkt = IncomingPacket(0xFF.toByte(), null, ByteArray(0))
+        val result = MessageParser.parse(pkt)
         assertNull(result)
     }
 
     @Test
-    fun `malformed payload returns null without throwing`() {
+    fun `malformed event payload returns null without throwing`() {
         // ROBOT_STATE with only 1 byte of payload — should not crash
-        val msg = IncomingMessage(MessageIds.ROBOT_STATE, ByteArray(1) { 0 })
-        // Parser should handle short buffers gracefully
+        val pkt = IncomingPacket(FrameCodec.PACKET_EVENT, EventIds.ROBOT_STATE, ByteArray(1) { 0 })
         try {
-            MessageParser.parse(msg) // may return partial result or null — must not throw
+            MessageParser.parse(pkt) // may return partial result or null — must not throw
         } catch (e: Exception) {
             fail("Parser threw on malformed payload: ${e.message}")
         }
     }
 
     @Test
-    fun `CONNECTED message parses version and robotId`() {
+    fun `CONNECT packet parses version and robotId`() {
         val payload = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN)
             .putShort(2).putInt(12345).array()
-        val msg = IncomingMessage(MessageIds.CONNECTED, payload)
-        val parsed = MessageParser.parse(msg)
+        val pkt = IncomingPacket(FrameCodec.PACKET_CONNECT, null, payload)
+        val parsed = MessageParser.parse(pkt)
         assertTrue(parsed is ParsedMessage.Connected)
         assertEquals(2, (parsed as ParsedMessage.Connected).version)
         assertEquals(12345, parsed.robotId)
     }
 
     @Test
-    fun `PONG message parses counter and timestamp`() {
-        val ts = System.currentTimeMillis()
-        val payload = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(7).putLong(ts).array()
-        val msg = IncomingMessage(MessageIds.PONG, payload)
-        val parsed = MessageParser.parse(msg)
-        assertTrue(parsed is ParsedMessage.Pong)
-        assertEquals(7u, (parsed as ParsedMessage.Pong).counter)
-        assertEquals(ts, parsed.timestamp)
-    }
-
-    @Test
-    fun `ANIMATION_COMPLETED parses name and success result`() {
+    fun `ANIMATION_STATE event parses name and success result`() {
         val name = "anim_happy_01"
         val nameBytes = name.toByteArray(Charsets.UTF_8)
         val payload = ByteArray(nameBytes.size + 2)
         nameBytes.copyInto(payload)
         payload[nameBytes.size] = 0     // null terminator
         payload[nameBytes.size + 1] = 0 // result = success
-        val msg = IncomingMessage(MessageIds.ANIMATION_COMPLETED, payload)
-        val parsed = MessageParser.parse(msg)
+        val pkt = IncomingPacket(FrameCodec.PACKET_EVENT, EventIds.ANIMATION_STATE, payload)
+        val parsed = MessageParser.parse(pkt)
         assertTrue(parsed is ParsedMessage.AnimationCompleted)
         assertEquals("anim_happy_01", (parsed as ParsedMessage.AnimationCompleted).name)
         assertTrue(parsed.result is ActionResult.Success)
     }
 
     @Test
-    fun `CAMERA_IMAGE parses image dimensions and jpeg data`() {
+    fun `IMAGE_CHUNK event parses image dimensions and jpeg data`() {
         val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0x01, 0x02)
         val payload = ByteBuffer.allocate(8 + jpeg.size).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(99)         // imageId
             .putShort(320)      // width
             .putShort(240)      // height
             .put(jpeg).array()
-        val msg = IncomingMessage(MessageIds.CAMERA_IMAGE, payload)
-        val parsed = MessageParser.parse(msg)
+        val pkt = IncomingPacket(FrameCodec.PACKET_EVENT, EventIds.IMAGE_CHUNK, payload)
+        val parsed = MessageParser.parse(pkt)
         assertTrue(parsed is ParsedMessage.CameraImage)
         parsed as ParsedMessage.CameraImage
         assertEquals(99, parsed.imageId)

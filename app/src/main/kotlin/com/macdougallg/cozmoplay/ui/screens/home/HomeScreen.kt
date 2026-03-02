@@ -12,6 +12,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.macdougallg.cozmoplay.protocol.ICozmoProtocol
 import com.macdougallg.cozmoplay.types.ConnectionState
 import com.macdougallg.cozmoplay.types.Emotion
@@ -19,7 +20,11 @@ import com.macdougallg.cozmoplay.types.ProtocolState
 import com.macdougallg.cozmoplay.ui.components.*
 import com.macdougallg.cozmoplay.ui.theme.*
 import com.macdougallg.cozmoplay.wifi.ICozmoWifi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterIsInstance
 import org.koin.androidx.compose.koinViewModel
 
 // ── ViewModel ─────────────────────────────────────────────────────────────────
@@ -31,6 +36,39 @@ class HomeViewModel(
     val connectionState: StateFlow<ConnectionState> = wifi.connectionState
     val emotion: StateFlow<com.macdougallg.cozmoplay.types.RobotState> = protocol.robotState
     val cubeStates = protocol.cubeStates
+
+    init {
+        // Initial connect
+        viewModelScope.launch(Dispatchers.IO) {
+            if (protocol.protocolState.value !is ProtocolState.Connected) {
+                protocol.connect(wifi)
+            }
+        }
+        // Auto-reconnect whenever protocol drops while WiFi is still up
+        viewModelScope.launch {
+            protocol.protocolState
+                .filterIsInstance<ProtocolState.Disconnected>()
+                .collect {
+                    if (wifi.isConnected) {
+                        viewModelScope.launch(Dispatchers.IO) { protocol.connect(wifi) }
+                    }
+                }
+        }
+        // Also reconnect whenever WiFi recovers (handles the case where protocol dropped
+        // while WiFi was briefly Scanning, so the above watcher missed the window).
+        // drop(1) skips the initial StateFlow value so this only fires on transitions.
+        viewModelScope.launch {
+            wifi.connectionState
+                .drop(1)
+                .filterIsInstance<ConnectionState.Connected>()
+                .collect {
+                    val ps = protocol.protocolState.value
+                    if (ps !is ProtocolState.Connected && ps !is ProtocolState.Connecting) {
+                        viewModelScope.launch(Dispatchers.IO) { protocol.connect(wifi) }
+                    }
+                }
+        }
+    }
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────

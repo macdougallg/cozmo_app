@@ -1,61 +1,49 @@
 package com.macdougallg.cozmoplay.protocol.messages
 
 /**
- * Cozmo protocol message ID constants.
+ * Cozmo protocol packet ID constants.
  *
- * Derived from PyCozmo clad/robot/messaging.py and associated .clad definition files.
- * All agents MUST verify these against PyCozmo source before sending to real hardware.
+ * These are the 1-byte ID fields carried inside COMMAND (0x04) and EVENT (0x05) packets.
+ * Source: PyCozmo protocol_declaration.py + protocol.html packet ID table.
  *
- * Reference: https://github.com/zayfod/pycozmo
+ * Commands travel engine → robot inside an ENGINE_PACKETS frame (type 0x07).
+ * Events  travel robot  → engine inside a ROBOT_PACKETS frame  (type 0x09).
  */
-object MessageIds {
+object CommandIds {
 
-    // ── Outbound: App → Robot ─────────────────────────────────────────────────
+    // ── Init sequence (sent after handshake) ──────────────────────────────────
+    const val ENABLE: Byte           = 0x25         //  0 bytes: enable robot subsystems (sent twice)
+    const val SET_ORIGIN: Byte       = 0x45         // 24 bytes: world-frame origin (see MessageBuilder)
+    const val SYNC_TIME: Byte        = 0x4b         //  8 bytes: timestamp sync — triggers RobotState streaming
 
-    const val CONNECT: UShort                = 0x0001u
-    const val DISCONNECT: UShort             = 0x0002u
-    const val PING: UShort                   = 0x0003u
+    // ── Drive ─────────────────────────────────────────────────────────────────
+    const val DRIVE_WHEELS: Byte     = 0x32         // 16 bytes: lspeed,rspeed,laccel,raccel (4×float)
+    const val STOP_ALL_MOTORS: Byte  = 0x3b.toByte()//  0 bytes
 
-    const val DRIVE_WHEELS: UShort           = 0x0031u
-    const val TURN_IN_PLACE: UShort          = 0x0032u
-    const val DRIVE_ARC: UShort              = 0x0033u
-    const val STOP_ALL_MOTORS: UShort        = 0x003Bu
+    // ── Head ──────────────────────────────────────────────────────────────────
+    const val DRIVE_HEAD: Byte       = 0x35         //  4 bytes: speed (float)
+    const val SET_HEAD_ANGLE: Byte   = 0x37         // 17 bytes: angle,maxSpeed,accel,duration (4×float) + actionId (uint8)
 
-    const val MOVE_HEAD: UShort              = 0x0037u
-    const val SET_HEAD_ANGLE: UShort         = 0x0038u
-    const val MOVE_LIFT: UShort              = 0x0039u
-    const val SET_LIFT_HEIGHT: UShort        = 0x003Au
+    // ── Lift ──────────────────────────────────────────────────────────────────
+    const val DRIVE_LIFT: Byte       = 0x34         //  4 bytes: speed (float)
+    const val SET_LIFT_HEIGHT: Byte  = 0x36         // 17 bytes: height,maxSpeed,accel,duration (4×float) + actionId (uint8)
 
-    const val PLAY_ANIMATION: UShort         = 0x00B0u
-    const val PLAY_ANIMATION_GROUP: UShort   = 0x00B1u
+    // ── Camera ────────────────────────────────────────────────────────────────
+    const val ENABLE_CAMERA: Byte    = 0x4c         //  2 bytes: imageSendMode (uint8), imageResolution (uint8)
+}
 
-    const val SET_CUBE_LIGHTS: UShort        = 0x00D0u
-    const val PICKUP_OBJECT: UShort          = 0x00A0u
-    const val PLACE_OBJECT: UShort           = 0x00A1u
-    const val ROLL_OBJECT: UShort            = 0x00A3u
+object EventIds {
+    // ── Streaming events (require SyncTime to be sent first) ──────────────────
+    const val ROBOT_STATE: Byte      = 0xf0.toByte() // 91 bytes: full robot telemetry
+    const val ANIMATION_STATE: Byte  = 0xf1.toByte() // 15 bytes
+    const val IMAGE_CHUNK: Byte      = 0xf2.toByte() // 24–1172 bytes: camera frame chunk
+    const val OBJECT_AVAILABLE: Byte = 0xf3.toByte() //  9 bytes: cube detected
+    const val OBJECT_CONNECTION_STATE: Byte = 0xd0.toByte() // 13 bytes: cube connect/disconnect
+    const val ACKNOWLEDGE_ACTION: Byte = 0xc4.toByte() //  1 byte: action complete
 
-    const val GO_TO_POSE: UShort             = 0x00A5u
-    const val ENABLE_FREEPLAY: UShort        = 0x0120u
-
-    const val SET_CAMERA_PARAMS: UShort      = 0x0070u
-    const val ENABLE_CAMERA: UShort          = 0x0071u
-
-    // ── Inbound: Robot → App ──────────────────────────────────────────────────
-
-    const val CONNECTED: UShort              = 0x0005u
-    const val PONG: UShort                   = 0x0006u
-
-    const val ROBOT_STATE: UShort            = 0x00F0u
-
-    const val ROBOT_OBSERVED_OBJECT: UShort  = 0x00C0u
-    const val ROBOT_PICKED_UP_OBJECT: UShort = 0x00C1u
-    const val ROBOT_PLACED_OBJECT: UShort    = 0x00C2u
-
-    const val ANIMATION_COMPLETED: UShort    = 0x00B5u
-    const val ROBOT_COMPLETED_ACTION: UShort = 0x00A8u
-
-    const val CAMERA_IMAGE: UShort           = 0x0080u
-
-    // Face events (v2 — parsed but not acted upon in v1)
-    const val ROBOT_OBSERVED_FACE: UShort    = 0x0111u
+    // ── Initial-burst packets (robot → engine after RESET, type 0x04) ─────────
+    const val HARDWARE_INFO: Byte      = 0xc9.toByte() //  6 bytes: CPU/hw revision info
+    const val FIRMWARE_SIGNATURE: Byte = 0xee.toByte() // 449 bytes: firmware build signature
+    const val DEBUG_DATA: Byte         = 0xb0.toByte() // variable: robot debug/diag data
+    const val BODY_INFO: Byte          = 0xed.toByte() //  4 bytes: body revision (triggers init)
 }
