@@ -211,18 +211,212 @@ class CozmoProtocolEngine : ICozmoProtocol {
     }
 
     // ── Animations ────────────────────────────────────────────────────────────
+    //
+    // The Cozmo robot has no built-in named animations. PyCozmo plays animations by
+    // streaming keyframe data (head angles, lift heights, backpack lights, face images,
+    // audio) frame-by-frame from FlatBuffers .bin files that ship with the Cozmo app.
+    //
+    // Since we don't have those asset files, tricks are implemented as hardcoded
+    // motor sequences — timed combinations of driveWheels, setHeadAngle, setLiftHeight
+    // commands that produce recognisable physical reactions from the robot.
 
     override suspend fun playAnimation(name: String): ActionResult {
         if (!isConnected()) return ActionResult.Failure("Not connected")
-        // Animation commands not yet mapped to correct command IDs — stub
-        Log.w(TAG, "playAnimation not yet implemented for real hardware")
-        return ActionResult.Failure("Not implemented")
+        Log.i(TAG, "playAnimation: $name")
+        return try {
+            withTimeout(ACTION_TIMEOUT_MS) {
+                when (name) {
+                    "anim_happy_01", "anim_happy_03"             -> trickNod()
+                    "anim_greeting_happy_01"                     -> trickGreeting()
+                    "anim_excited_01"                            -> trickSpin()
+                    "anim_hiccup_01"                             -> trickHiccup()
+                    "anim_dizzy_shakeonce_01"                    -> trickDizzy()
+                    "anim_sneeze_01"                             -> trickSneeze()
+                    "anim_bored_01", "anim_bored_event_01"       -> trickBored()
+                    "anim_angry_01", "anim_angry_frustrated_01"  -> trickAngry()
+                    "anim_frustrated_01"                         -> trickFrustrated()
+                    "anim_sad_01"                                -> trickSad()
+                    "anim_whimper_01"                            -> trickWhimper()
+                    "anim_surprised_01"                          -> trickSurprised()
+                    "anim_startled_01"                           -> trickStartled()
+                    "anim_scared_01"                             -> trickScared()
+                    "anim_gotosleep_01"                          -> trickGoToSleep()
+                    "anim_sleeping_01"                           -> trickSleeping()
+                    "anim_feedback_scanneractivated_01"          -> trickScanner()
+                    "anim_feedback_pickup_01"                    -> trickPickup()
+                    else                                         -> trickNod()
+                }
+                ActionResult.Success
+            }
+        } catch (_: TimeoutCancellationException) {
+            ActionResult.Timeout
+        }
     }
 
     override suspend fun playAnimationGroup(groupName: String): ActionResult {
         if (!isConnected()) return ActionResult.Failure("Not connected")
-        Log.w(TAG, "playAnimationGroup not yet implemented for real hardware")
-        return ActionResult.Failure("Not implemented")
+        val anims = AnimationManifest.BY_CATEGORY[groupName] ?: AnimationManifest.ALL
+        return playAnimation(anims.random())
+    }
+
+    // ── Trick Sequences ───────────────────────────────────────────────────────
+    // Each suspend function executes a timed motor sequence and returns when done.
+    // Head angle range: -0.44 (down) to +0.78 rad (up).
+    // Lift height range: 32mm (low) to 92mm (high).
+    // Wheel speed range: -220 to +220 mm/s.
+
+    /** Happy — enthusiastic head nod */
+    private suspend fun trickNod() {
+        setHeadAngle(0.6f);  delay(250)
+        setHeadAngle(-0.1f); delay(250)
+        setHeadAngle(0.6f);  delay(250)
+        setHeadAngle(0.0f);  delay(200)
+    }
+
+    /** Greeting — bow and rise */
+    private suspend fun trickGreeting() {
+        setHeadAngle(0.5f); setLiftHeight(80f); delay(400)
+        setHeadAngle(-0.3f); setLiftHeight(32f); delay(600)
+        setHeadAngle(0.0f); delay(300)
+    }
+
+    /** Excited — spin in place */
+    private suspend fun trickSpin() {
+        driveWheels(-200f, 200f); delay(600)
+        stopAllMotors(); delay(200)
+    }
+
+    /** Hiccup — sharp head jerks */
+    private suspend fun trickHiccup() {
+        setHeadAngle(0.7f); delay(100)
+        setHeadAngle(0.0f); delay(300)
+        setHeadAngle(0.7f); delay(100)
+        setHeadAngle(0.0f); delay(400)
+    }
+
+    /** Dizzy — weave side to side */
+    private suspend fun trickDizzy() {
+        driveWheels(130f, 20f); delay(300)
+        driveWheels(20f, 130f); delay(300)
+        driveWheels(130f, 20f); delay(300)
+        stopAllMotors()
+    }
+
+    /** Sneeze — head flings forward then recovers */
+    private suspend fun trickSneeze() {
+        setHeadAngle(0.4f); delay(600)
+        setHeadAngle(-0.4f); delay(150)
+        driveWheels(-100f, -100f); delay(200)
+        stopAllMotors()
+        setHeadAngle(0.0f); delay(300)
+    }
+
+    /** Bored — slow aimless drift, head down */
+    private suspend fun trickBored() {
+        setHeadAngle(-0.3f); delay(400)
+        driveWheels(50f, 50f); delay(700)
+        stopAllMotors(); delay(500)
+        driveWheels(-50f, -50f); delay(300)
+        stopAllMotors()
+        setHeadAngle(0.0f); delay(300)
+    }
+
+    /** Angry — rapid spinning alternation */
+    private suspend fun trickAngry() {
+        driveWheels(-180f, 180f); delay(300)
+        driveWheels(180f, -180f); delay(300)
+        driveWheels(-180f, 180f); delay(300)
+        stopAllMotors()
+        setHeadAngle(-0.2f); delay(300)
+        setHeadAngle(0.0f)
+    }
+
+    /** Frustrated — charge forward and back */
+    private suspend fun trickFrustrated() {
+        driveWheels(150f, 150f); delay(250)
+        driveWheels(-150f, -150f); delay(250)
+        driveWheels(150f, 150f); delay(250)
+        stopAllMotors()
+        setHeadAngle(-0.2f); delay(400)
+        setHeadAngle(0.0f)
+    }
+
+    /** Sad — slow head droop, drift back */
+    private suspend fun trickSad() {
+        setHeadAngle(-0.4f); delay(800)
+        driveWheels(-40f, -40f); delay(600)
+        stopAllMotors()
+        setHeadAngle(0.0f); delay(400)
+    }
+
+    /** Whimper — slight tremor, head down */
+    private suspend fun trickWhimper() {
+        setHeadAngle(-0.3f); delay(300)
+        driveWheels(-30f, 30f); delay(150)
+        driveWheels(30f, -30f); delay(150)
+        driveWheels(-30f, 30f); delay(150)
+        stopAllMotors()
+        setHeadAngle(0.0f); delay(300)
+    }
+
+    /** Surprised — head snaps up, backs away */
+    private suspend fun trickSurprised() {
+        setHeadAngle(0.78f); delay(200)
+        driveWheels(-120f, -120f); delay(300)
+        stopAllMotors()
+        setHeadAngle(0.0f); delay(400)
+    }
+
+    /** Startled — quick spin then head up */
+    private suspend fun trickStartled() {
+        driveWheels(-150f, 150f); delay(200)
+        stopAllMotors()
+        setHeadAngle(0.78f); delay(300)
+        setHeadAngle(0.0f); delay(400)
+    }
+
+    /** Scared — rapid vibrate in place */
+    private suspend fun trickScared() {
+        repeat(3) {
+            driveWheels(-60f, 60f); delay(100)
+            driveWheels(60f, -60f); delay(100)
+        }
+        stopAllMotors()
+        setHeadAngle(-0.2f); delay(500)
+        setHeadAngle(0.0f)
+    }
+
+    /** Go to sleep — head and lift drop */
+    private suspend fun trickGoToSleep() {
+        setHeadAngle(-0.4f); setLiftHeight(32f); delay(800)
+        delay(800)
+        setHeadAngle(0.0f); delay(500)
+    }
+
+    /** Sleeping — gentle head bobs (breathing) */
+    private suspend fun trickSleeping() {
+        setHeadAngle(-0.35f); delay(600)
+        setHeadAngle(-0.28f); delay(600)
+        setHeadAngle(-0.35f); delay(600)
+        setHeadAngle(0.0f); delay(400)
+    }
+
+    /** Scanner — look around left and right */
+    private suspend fun trickScanner() {
+        setHeadAngle(0.5f); delay(400)
+        setHeadAngle(-0.2f); delay(400)
+        driveWheels(-100f, 100f); delay(400)
+        stopAllMotors()
+        setHeadAngle(0.3f); delay(400)
+        driveWheels(100f, -100f); delay(400)
+        stopAllMotors()
+        setHeadAngle(0.0f)
+    }
+
+    /** Pickup feedback — lift raises and lowers */
+    private suspend fun trickPickup() {
+        setLiftHeight(90f); delay(600)
+        setLiftHeight(32f); delay(500)
     }
 
     // ── Cube Commands ─────────────────────────────────────────────────────────
@@ -342,7 +536,9 @@ class CozmoProtocolEngine : ICozmoProtocol {
         when (id) {
             EventIds.ROBOT_STATE           -> parseRobotState(payload)
             EventIds.IMAGE_CHUNK           -> parseImageChunk(payload)
-            EventIds.ANIMATION_STATE       -> Log.d(TAG, "AnimationState received (${payload.size} bytes)")
+            EventIds.ANIMATION_STATE       -> Log.d(TAG, "AnimationState (0xf1) received (${payload.size} bytes)")
+            EventIds.ANIMATION_STARTED     -> Log.d(TAG, "AnimationStarted: id=${payload.firstOrNull()?.toInt()?.and(0xFF)}")
+            EventIds.ANIMATION_ENDED       -> Log.d(TAG, "AnimationEnded:   id=${payload.firstOrNull()?.toInt()?.and(0xFF)}")
             EventIds.OBJECT_AVAILABLE      -> Log.d(TAG, "ObjectAvailable received")
             EventIds.OBJECT_CONNECTION_STATE -> Log.d(TAG, "ObjectConnectionState received")
             EventIds.ACKNOWLEDGE_ACTION    -> Log.d(TAG, "AcknowledgeAction received")

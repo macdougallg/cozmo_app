@@ -28,6 +28,15 @@ object CommandIds {
     const val DRIVE_LIFT: Byte       = 0x34         //  4 bytes: speed (float)
     const val SET_LIFT_HEIGHT: Byte  = 0x36         // 17 bytes: height,maxSpeed,accel,duration (4×float) + actionId (uint8)
 
+    // ── Animations ────────────────────────────────────────────────────────────
+    // Note: Cozmo has no built-in named animations. The robot plays animation data
+    // streamed frame-by-frame from the host. START_ANIMATION begins a stream session;
+    // END_ANIMATION marks the end. anim_id is a host-chosen UInt8 session token echoed
+    // back by the robot in ANIMATION_STARTED/ANIMATION_ENDED events.
+    const val START_ANIMATION: Byte  = 0x9b.toByte() //  1 byte: anim_id (session token, UInt8)
+    const val END_ANIMATION: Byte    = 0x9a.toByte() //  0 bytes: marks end of streamed animation frames
+    const val ABORT_ANIMATION: Byte  = 0x8d.toByte() //  0 bytes: aborts current animation immediately
+
     // ── Camera ────────────────────────────────────────────────────────────────
     const val ENABLE_CAMERA: Byte         = 0x4c    //  2 bytes: imageSendMode (uint8), imageResolution (uint8)
     const val ENABLE_COLOR_IMAGES: Byte   = 0x66    //  1 byte:  enable (bool) — 0=gray, 1=color
@@ -42,6 +51,8 @@ object EventIds {
     const val IMAGE_CHUNK: Byte      = 0xf2.toByte() // 24–1172 bytes: camera frame chunk
     const val OBJECT_AVAILABLE: Byte = 0xf3.toByte() //  9 bytes: cube detected
     const val OBJECT_CONNECTION_STATE: Byte = 0xd0.toByte() // 13 bytes: cube connect/disconnect
+    const val ANIMATION_STARTED: Byte  = 0xca.toByte() //  1 byte: anim_id echo — robot began streaming animation
+    const val ANIMATION_ENDED: Byte    = 0xcb.toByte() //  1 byte: anim_id echo — robot finished animation
     const val ACKNOWLEDGE_ACTION: Byte = 0xc4.toByte() //  1 byte: action complete
 
     // ── Initial-burst packets (robot → engine after RESET, type 0x04) ─────────
