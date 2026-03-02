@@ -134,9 +134,15 @@ interface ICozmoProtocol {
 
     /**
      * Enable or disable the robot's camera stream.
-     * When enabled, decoded frames are emitted on [cameraFrames].
+     * When enabled, color frames are requested; decoded Bitmaps emit on [cameraFrames].
      */
     fun enableCamera(enabled: Boolean)
+
+    /**
+     * Enable or disable night vision mode.
+     * Turns the forehead LED on/off and adjusts camera gain/exposure accordingly.
+     */
+    fun setNightVision(enabled: Boolean)
 
     /**
      * Stream of decoded camera frames. Consumed by cozmo-camera module.

@@ -252,6 +252,13 @@ class CozmoProtocolEngine : ICozmoProtocol {
     override fun enableCamera(enabled: Boolean) {
         if (!isConnected()) return
         sendCommand(CommandIds.ENABLE_CAMERA, MessageBuilder.enableCamera(enabled))
+        sendCommand(CommandIds.ENABLE_COLOR_IMAGES, MessageBuilder.enableColorImages(enabled))
+    }
+
+    override fun setNightVision(enabled: Boolean) {
+        if (!isConnected()) { Log.w(TAG, "setNightVision($enabled): not connected — skipping"); return }
+        Log.d(TAG, "setNightVision($enabled): sending SetHeadLight")
+        sendCommand(CommandIds.SET_HEAD_LIGHT, MessageBuilder.setHeadLight(enabled))
     }
 
     // ── Freeplay ──────────────────────────────────────────────────────────────
@@ -411,7 +418,7 @@ class CozmoProtocolEngine : ICozmoProtocol {
         val imageId    = buf.getInt()
         buf.getInt()                                          // chunk_debug — skip
         val encoding   = buf.get().toInt().and(0xFF)
-        buf.get()                                             // image_resolution — skip
+        val resolution = buf.get().toInt().and(0xFF)          // IMAGE_RESOLUTION enum
         val chunkCount = buf.get().toInt().and(0xFF)
         val chunkId    = buf.get().toInt().and(0xFF)
         buf.getShort()                                        // status — skip
@@ -419,9 +426,10 @@ class CozmoProtocolEngine : ICozmoProtocol {
 
         if (pktNum <= 3) Log.d(TAG, "ImageChunk #$pktNum: id=$imageId enc=$encoding count=$chunkCount chunk=$chunkId dataLen=$dataLen payloadSize=${payload.size}")
 
-        if (encoding != 2) { Log.w(TAG, "ImageChunk: unsupported encoding $encoding"); return }
-        if (chunkCount == 0 || chunkCount > 16) { Log.w(TAG, "ImageChunk: bad chunkCount $chunkCount"); return }
-        if (chunkId >= chunkCount) { Log.w(TAG, "ImageChunk: chunkId $chunkId >= chunkCount $chunkCount"); return }
+        // Allow all JPEG-family encodings: 5=JPEGGray, 6=JPEGColor, 7=JPEGColorHalfWidth,
+        // 8=JPEGMinimizedGray, 9=JPEGMinimizedColor. Skip non-JPEG (RawGray=1, RawRGB=2, etc.)
+        if (encoding < 5) { if (pktNum <= 3) Log.w(TAG, "ImageChunk: non-JPEG encoding $encoding — skipping"); return }
+        if (chunkId > 32) { Log.w(TAG, "ImageChunk: chunkId $chunkId out of range"); return }
         if (buf.remaining() < dataLen) { Log.w(TAG, "ImageChunk: buf.remaining=${buf.remaining()} < dataLen=$dataLen"); return }
 
         val chunkData = ByteArray(dataLen).also { buf.get(it) }
@@ -431,41 +439,54 @@ class CozmoProtocolEngine : ICozmoProtocol {
             imageChunkBuffers.remove(imageChunkBuffers.keys.first())
         }
 
-        val frame = imageChunkBuffers.getOrPut(imageId) {
-            ImageFrameBuffer(chunkCount, arrayOfNulls(chunkCount))
-        }
+        val frame = imageChunkBuffers.getOrPut(imageId) { ImageFrameBuffer() }
+        frame.chunks.putIfAbsent(chunkId, chunkData)
 
-        if (chunkId < frame.chunks.size && frame.chunks[chunkId] == null) {
-            frame.chunks[chunkId] = chunkData
-            frame.received++
-        }
+        // count=0 on intermediate chunks; the LAST chunk carries the real total count
+        if (chunkCount > 0) frame.totalChunks = chunkCount
 
-        if (frame.received >= frame.totalChunks) {
+        if (frame.totalChunks > 0 && frame.chunks.size >= frame.totalChunks) {
             imageChunkBuffers.remove(imageId)
-            val allChunks = frame.chunks
-            if (allChunks.any { it == null }) return  // shouldn't happen
+            val total = frame.totalChunks
+            val allChunks = (0 until total).mapNotNull { frame.chunks[it] }
+            if (allChunks.size != total) return  // gap — shouldn't happen
 
-            val totalSize = allChunks.sumOf { it!!.size }
+            val totalSize = allChunks.sumOf { it.size }
             val jpegBytes = ByteArray(totalSize)
             var pos = 0
-            for (chunk in allChunks) { chunk!!.copyInto(jpegBytes, pos); pos += chunk.size }
-            Log.d(TAG, "ImageChunk: frame $imageId complete ($chunkCount chunks, ${totalSize}B) — decoding JPEG")
+            for (chunk in allChunks) { chunk.copyInto(jpegBytes, pos); pos += chunk.size }
+            val (imgW, imgH) = CozmoImageDecoder.resolutionSize(resolution)
+
+            // data[0] is the color flag byte: 0 = gray, non-zero = color (YCbCr).
+            // The enc field stays 8 regardless — this byte is the real signal.
+            // Per PyCozmo _process_completed_image: color frames use imgW/2 in the JPEG header.
+            val isColor = jpegBytes.isNotEmpty() && jpegBytes[0] != 0.toByte()
+            if (pktNum <= 5) Log.d(TAG, "ImageChunk: frame $imageId complete ($total chunks, ${totalSize}B enc=$encoding color=$isColor)")
 
             scope.launch(Dispatchers.Default) {
-                val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size) ?: run {
-                    Log.w(TAG, "ImageChunk: JPEG decode failed for frame $imageId")
+                val decodable = when {
+                    encoding == 9 -> CozmoImageDecoder.miniColorToJpeg(jpegBytes, imgW / 2, imgH)
+                    isColor       -> CozmoImageDecoder.miniColorToJpeg(jpegBytes, imgW / 2, imgH)
+                    else          -> CozmoImageDecoder.miniGrayToJpeg(jpegBytes, imgW, imgH)
+                }
+                var bitmap = BitmapFactory.decodeByteArray(decodable, 0, decodable.size) ?: run {
+                    Log.w(TAG, "ImageChunk: decode failed for frame $imageId (enc=$encoding color=$isColor ${imgW}x${imgH} ${totalSize}B)")
                     return@launch
+                }
+                // Color frames decode as half-width (160×240) due to 4:2:2 YCbCr packing.
+                // Stretch back to full camera width so downstream scaling sees correct 4:3 ratio.
+                if (isColor && bitmap.width < imgW) {
+                    bitmap = Bitmap.createScaledBitmap(bitmap, imgW, imgH, true)
                 }
                 _cameraFrames.emit(bitmap)
             }
         }
     }
 
-    private data class ImageFrameBuffer(
-        val totalChunks: Int,
-        val chunks: Array<ByteArray?>,
-        var received: Int = 0,
-    )
+    private class ImageFrameBuffer {
+        val chunks = HashMap<Int, ByteArray>()
+        var totalChunks: Int = 0  // 0 = unknown; set when the last chunk (count > 0) arrives
+    }
 
     private fun parseRobotState(payload: ByteArray) {
         if (payload.size < 91) {

@@ -98,6 +98,26 @@ object MessageBuilder {
         return buf.array()
     }
 
+    /** EnableColorImages — 1 byte. 1=color (enc=9), 0=grayscale (enc=8). */
+    fun enableColorImages(enabled: Boolean): ByteArray =
+        byteArrayOf(if (enabled) 1 else 0)
+
+    /** SetHeadLight — 1 byte. Toggles Cozmo's forehead LED for night vision. */
+    fun setHeadLight(enabled: Boolean): ByteArray =
+        byteArrayOf(if (enabled) 1 else 0)
+
+    /**
+     * SetCameraParams — 7 bytes.
+     * gain (float32), exposure_ms (uint16), auto_exposure_enabled (bool)
+     */
+    fun setCameraParams(gain: Float, exposureMs: Int, autoExposure: Boolean): ByteArray {
+        val buf = ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putFloat(gain)
+        buf.putShort(exposureMs.toShort())
+        buf.put(if (autoExposure) 1 else 0)
+        return buf.array()
+    }
+
     // ── Init sequence ─────────────────────────────────────────────────────────
 
     /** Enable — 0 bytes. Sent twice after FirmwareSignature to trigger BodyInfo. */

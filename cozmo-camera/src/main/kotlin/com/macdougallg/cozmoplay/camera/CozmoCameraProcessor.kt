@@ -22,9 +22,10 @@ import kotlinx.coroutines.flow.*
  * - All public methods: callable from any thread
  *
  * Memory:
- * - Double-buffer: one Bitmap being displayed, one being processed
- * - Previous display Bitmap recycled when next frame is ready
- * - All buffers released within 500ms of setEnabled(false)
+ * - BitmapFactory produces a new Bitmap per frame; GC collects unreachable ones.
+ * - Manual recycling is intentionally avoided — Compose may draw a bitmap
+ *   on the next vsync after it is no longer referenced by state, causing
+ *   "Canvas: trying to use a recycled bitmap" crashes if recycled too early.
  */
 class CozmoCameraProcessor(
     private val protocol: ICozmoProtocol,
@@ -42,6 +43,9 @@ class CozmoCameraProcessor(
 
     private val _isEnabled = MutableStateFlow(false)
     override val isEnabled: StateFlow<Boolean> = _isEnabled.asStateFlow()
+
+    private val _isNightVision = MutableStateFlow(false)
+    override val isNightVision: StateFlow<Boolean> = _isNightVision.asStateFlow()
 
     private val _currentFps = MutableStateFlow(0f)
     override val currentFps: StateFlow<Float> = _currentFps.asStateFlow()
@@ -69,9 +73,6 @@ class CozmoCameraProcessor(
     // FPS tracking — rolling window of frame timestamps
     private val frameTimestamps = ArrayDeque<Long>(FPS_WINDOW_SIZE + 1)
 
-    // Double-buffer — previous frame held for recycling
-    @Volatile private var previousDisplayBitmap: Bitmap? = null
-
     // ── Public API ─────────────────────────────────────────────────────────────
 
     override fun setEnabled(enabled: Boolean) {
@@ -87,6 +88,13 @@ class CozmoCameraProcessor(
         displayWidthPx = widthPx
         displayHeightPx = heightPx
         Log.d(TAG, "Display size set to ${widthPx}x${heightPx}")
+    }
+
+    override fun setNightVision(enabled: Boolean) {
+        if (_isNightVision.value == enabled) return
+        _isNightVision.value = enabled
+        protocol.setNightVision(enabled)
+        Log.d(TAG, "Night vision ${if (enabled) "enabled" else "disabled"}")
     }
 
     // ── Pipeline ──────────────────────────────────────────────────────────────
@@ -106,8 +114,6 @@ class CozmoCameraProcessor(
                     .onEach { bitmap ->
                         cancelNoFrameTimeout()
                         val scaled = scaleBitmap(bitmap)
-                        recyclePrevious()
-                        previousDisplayBitmap = scaled
                         _displayFrames.emit(scaled)
                         updateFps()
                         emitState(CameraState.Streaming(_currentFps.value))
@@ -139,16 +145,14 @@ class CozmoCameraProcessor(
         pipelineJob = null
         protocol.enableCamera(false)
 
-        // Release bitmap buffers within 500ms (Camera PRD NFR-02)
         scope.launch {
             delay(100)
-            recyclePrevious()
             frameTimestamps.clear()
             withContext(Dispatchers.Main) {
                 _currentFps.value = 0f
             }
             emitState(CameraState.Disabled)
-            Log.d(TAG, "Camera pipeline stopped, buffers released")
+            Log.d(TAG, "Camera pipeline stopped")
         }
     }
 
@@ -185,17 +189,7 @@ class CozmoCameraProcessor(
             (displayHeightPx * srcRatio).toInt() to displayHeightPx
         }
 
-        return Bitmap.createScaledBitmap(source, scaledW, scaledH, false)
-    }
-
-    private fun recyclePrevious() {
-        previousDisplayBitmap?.let {
-            if (!it.isRecycled) {
-                it.recycle()
-                Log.v(TAG, "Recycled previous display bitmap")
-            }
-        }
-        previousDisplayBitmap = null
+        return Bitmap.createScaledBitmap(source, scaledW, scaledH, true)
     }
 
     // ── FPS Tracking ──────────────────────────────────────────────────────────

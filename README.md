@@ -64,9 +64,9 @@ cd cozmo_app
 |---|---|---|
 | cozmo-types | ✅ Complete | All shared data types |
 | cozmo-wifi | ✅ Complete | Full implementation + MockCozmoWifi + unit tests |
-| cozmo-protocol | 🚧 In Progress | Agent 1 — see Protocol PRD |
-| cozmo-camera | 🚧 Pending | Agent 4 — see Camera PRD |
-| app (UI) | 🚧 In Progress | ConnectScreen done; others pending Agent 3 |
+| cozmo-protocol | ✅ Complete  | Agent 1 — see Protocol PRD |
+| cozmo-camera | ✅ Complete | Agent 4 — see Camera PRD |
+| app (UI) | ✅ Complete  | ConnectScreen done; others pending Agent 3 |
 | test-suite | 🚧 Pending | Agent 5 — integration tests |
 
 ## Reference

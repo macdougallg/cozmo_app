@@ -22,6 +22,9 @@ class MockCozmoCamera : ICozmoCamera {
     private val _cameraState = MutableStateFlow<CameraState>(CameraState.Disabled)
     override val cameraState: StateFlow<CameraState> = _cameraState.asStateFlow()
 
+    private val _isNightVision = MutableStateFlow(false)
+    override val isNightVision: StateFlow<Boolean> = _isNightVision.asStateFlow()
+
     private val _displayFrames = MutableSharedFlow<Bitmap>(
         replay = 1,
         extraBufferCapacity = 16,
@@ -49,6 +52,10 @@ class MockCozmoCamera : ICozmoCamera {
 
     override fun setDisplaySize(widthPx: Int, heightPx: Int) {
         lastDisplaySize = Pair(widthPx, heightPx)
+    }
+
+    override fun setNightVision(enabled: Boolean) {
+        _isNightVision.value = enabled
     }
 
     // ── Simulation ────────────────────────────────────────────────────────────

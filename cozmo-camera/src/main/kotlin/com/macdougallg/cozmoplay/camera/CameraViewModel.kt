@@ -35,6 +35,12 @@ class CameraViewModel(private val camera: ICozmoCamera) : ViewModel() {
         camera.setDisplaySize(widthPx, heightPx)
     }
 
+    val isNightVision: StateFlow<Boolean> = camera.isNightVision
+
+    fun toggleNightVision() {
+        camera.setNightVision(!camera.isNightVision.value)
+    }
+
     override fun onCleared() {
         super.onCleared()
         // Do not call shutdown() — camera is a singleton that may outlive this ViewModel

@@ -5,6 +5,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,10 +43,13 @@ fun CozmoCamera(
 ) {
     val cameraState by viewModel.cameraState.collectAsState()
     val fps by viewModel.currentFps.collectAsState()
+    val isNightVision by viewModel.isNightVision.collectAsState()
 
     // Collect latest frame — derivedStateOf ensures only Image recomposes, not parent
     val latestFrame by viewModel.displayFrames.collectAsState(initial = null)
     val displayBitmap by remember { derivedStateOf { latestFrame } }
+
+    val isActive = cameraState is CameraState.Streaming || cameraState is CameraState.Paused
 
     Box(
         modifier = modifier
@@ -61,6 +65,15 @@ fun CozmoCamera(
                 reason = (cameraState as CameraState.StreamError).reason
             )
             is CameraState.Paused -> StreamingPanel(bitmap = displayBitmap) // show last frame
+        }
+
+        // Night vision toggle — bottom-left corner, visible when camera is active
+        if (isActive) {
+            NightVisionButton(
+                isEnabled = isNightVision,
+                onClick = { viewModel.toggleNightVision() },
+                modifier = Modifier.align(Alignment.BottomStart),
+            )
         }
 
         // Debug FPS overlay — top-right corner, debug builds only (FR-05)
@@ -142,6 +155,33 @@ private fun ErrorPanel(reason: String) {
         )
         // Debug info only — not shown to child in production
         // In production, parent UI handles retry via CameraState.StreamError
+    }
+}
+
+@Composable
+private fun NightVisionButton(
+    isEnabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .padding(6.dp)
+            .background(
+                color = if (isEnabled) Color(0xFFB8860B).copy(alpha = 0.85f)
+                        else Color.Black.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(4.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = if (isEnabled) "NV ON" else "NV",
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 

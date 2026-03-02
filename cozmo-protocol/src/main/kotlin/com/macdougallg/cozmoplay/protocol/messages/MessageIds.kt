@@ -29,7 +29,10 @@ object CommandIds {
     const val SET_LIFT_HEIGHT: Byte  = 0x36         // 17 bytes: height,maxSpeed,accel,duration (4×float) + actionId (uint8)
 
     // ── Camera ────────────────────────────────────────────────────────────────
-    const val ENABLE_CAMERA: Byte    = 0x4c         //  2 bytes: imageSendMode (uint8), imageResolution (uint8)
+    const val ENABLE_CAMERA: Byte         = 0x4c    //  2 bytes: imageSendMode (uint8), imageResolution (uint8)
+    const val ENABLE_COLOR_IMAGES: Byte   = 0x66    //  1 byte:  enable (bool) — 0=gray, 1=color
+    const val SET_HEAD_LIGHT: Byte        = 0x0b    //  1 byte:  enable (bool) — forehead LED
+    const val SET_CAMERA_PARAMS: Byte     = 0x57    //  7 bytes: gain (float32), exposure_ms (uint16), auto_exposure (bool)
 }
 
 object EventIds {

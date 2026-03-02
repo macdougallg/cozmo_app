@@ -45,4 +45,13 @@ interface ICozmoCamera {
      * Default: 320x240 (Cozmo native resolution).
      */
     fun setDisplaySize(widthPx: Int, heightPx: Int)
+
+    /** Whether night vision mode (head LED + boosted exposure) is active. */
+    val isNightVision: StateFlow<Boolean>
+
+    /**
+     * Enable or disable night vision mode.
+     * Turns the forehead LED on/off and adjusts camera gain/exposure.
+     */
+    fun setNightVision(enabled: Boolean)
 }

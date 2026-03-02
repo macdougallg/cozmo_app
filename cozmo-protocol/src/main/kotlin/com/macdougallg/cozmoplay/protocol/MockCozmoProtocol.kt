@@ -130,6 +130,10 @@ class MockCozmoProtocol : ICozmoProtocol {
 
     override fun enableCamera(enabled: Boolean) { cameraEnabled = enabled }
 
+    var nightVisionEnabled: Boolean = false
+        private set
+    override fun setNightVision(enabled: Boolean) { nightVisionEnabled = enabled }
+
     // ── Freeplay ──────────────────────────────────────────────────────────────
 
     override fun enableFreeplay(enabled: Boolean) { freeplayEnabled = enabled }
@@ -205,6 +209,7 @@ class MockCozmoProtocol : ICozmoProtocol {
         lastHeadAngle = null
         lastLiftHeight = null
         cameraEnabled = false
+        nightVisionEnabled = false
         freeplayEnabled = false
         connectCallCount = 0
         disconnectCallCount = 0
